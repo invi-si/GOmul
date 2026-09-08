@@ -26,6 +26,6 @@ PYBUILD
 )
 cargo build --locked --release -p wie-android --target aarch64-linux-android --features experimental-thumb-inline,experimental-thumb-table
 mkdir -p wie-android/android/app/src/main/jniLibs/arm64-v8a
-cp target/aarch64-linux-android/release/libwie_android.so wie-android/android/app/src/main/jniLibs/arm64-v8a/
+cp "${CARGO_TARGET_DIR:-target}/aarch64-linux-android/release/libwie_android.so" wie-android/android/app/src/main/jniLibs/arm64-v8a/
 python3 wie-android/generate-notices.py
 "$root/wie-android/android/gradlew" -p "$root/wie-android/android" :app:assembleDebug

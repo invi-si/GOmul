@@ -63,8 +63,8 @@ The CPU transcript and control-stability reports document the benchmark tools in
 `tools/cpu-bench/`. Raw memory fixtures cannot be redistributed here; exact private
 workload results are documented observations, not publicly downloadable fixtures.
 Do not attach them to issues or pull requests. Existing copyright/license notices
-and WIE attribution remain unchanged. This source update does not replace the
-published 0.1.0 APK; that binary predates the timer fix.
+and WIE attribution remain unchanged. The refreshed 0.1.0 APK (Android version code 7) includes the timer fix.
+The original version code 6 APK predates it.
 
 ## Source publication checks
 
@@ -79,7 +79,8 @@ Android ARM64 capture-feature checking and Java/manifest compilation passed for
 both the normal debug configuration and opt-in trace release configuration.
 Manifest inspection confirmed the normal app ID/label and disabled shell
 profiling, with separate trace identity/profileability when requested.
-No APK was installed or released during source publication.
+No APK was installed or released during the initial source publication.
+The subsequent APK refresh is documented in the release notes.
 
 Two previously reproduced baseline MIDP full-suite hangs (timed alert without a
 previous screen and ticker screen retention) remain documented limitations;

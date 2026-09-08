@@ -14,7 +14,7 @@ A Korean feature-phone emulator based on [WIE](https://github.com/dlunch/wie) by
 
 ## Development since 0.1.0
 
-The source now includes WIPI timer cancellation correctness, opt-in input/timer diagnostics, deterministic CPU replay and regression tests. See the [performance research index](docs/performance-research.md) for findings, rejected experiments and measurement limits. The downloadable 0.1.0 APK predates these changes.
+The source now includes WIPI timer cancellation correctness, opt-in input/timer diagnostics, deterministic CPU replay and regression tests. See the [performance research index](docs/performance-research.md) for findings, rejected experiments and measurement limits. The refreshed 0.1.0 APK (Android version code 7) includes the timer fix; see the release notes for checkpoint compatibility.
 
 ## Tested games
 
