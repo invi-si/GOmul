@@ -822,6 +822,16 @@ mod test {
                     .invoke_virtual(&first, "org/kwis/msp/lcdui/Card", "serviceRepaints", "()V", ())
                     .await?;
                 assert_eq!(jvm.get_field::<i32>(&first, "paintCount", "I").await?, paint_count + 1);
+                // A serviced request must not trigger another application paint.
+                let _: () = jvm
+                    .invoke_virtual(&first, "org/kwis/msp/lcdui/Card", "serviceRepaints", "()V", ())
+                    .await?;
+                assert_eq!(jvm.get_field::<i32>(&first, "paintCount", "I").await?, paint_count + 1);
+                let _: () = jvm.invoke_virtual(&first, "org/kwis/msp/lcdui/Card", "repaint", "()V", ()).await?;
+                let _: () = jvm
+                    .invoke_virtual(&first, "org/kwis/msp/lcdui/Card", "serviceRepaints", "()V", ())
+                    .await?;
+                assert_eq!(jvm.get_field::<i32>(&first, "paintCount", "I").await?, paint_count + 2);
 
                 let other_canvas: ClassInstanceRef<CardCanvas> = jvm.new_class("net/wie/CardCanvas", "()V", ()).await?.into();
                 let _: () = jvm

@@ -57,8 +57,25 @@ impl KeyCode {
             "#" => KeyCode::HASH,
             "*" => KeyCode::STAR,
             "CLR" => KeyCode::CLEAR,
+            "CALL" => KeyCode::CALL,
+            "HANGUP" => KeyCode::HANGUP,
+            "LSOFT" => KeyCode::LEFT_SOFT_KEY,
+            "RSOFT" => KeyCode::RIGHT_SOFT_KEY,
             _ => unimplemented!("Unknown key: {string}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KeyCode;
+
+    #[test]
+    fn parse_phone_function_keys() {
+        assert_eq!(KeyCode::parse("CALL"), KeyCode::CALL);
+        assert_eq!(KeyCode::parse("HANGUP"), KeyCode::HANGUP);
+        assert_eq!(KeyCode::parse("LSOFT"), KeyCode::LEFT_SOFT_KEY);
+        assert_eq!(KeyCode::parse("RSOFT"), KeyCode::RIGHT_SOFT_KEY);
     }
 }
 

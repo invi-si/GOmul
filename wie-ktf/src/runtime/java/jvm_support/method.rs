@@ -356,7 +356,10 @@ impl Method for JavaMethod {
                             .exception("net/wie/WieError", "Java exception unwind crossed into JVM caller")
                             .await
                     }
-                    _ => jvm_clone.exception("net/wie/WieError", &x.to_string()).await,
+                    _ => {
+                        tracing::debug!("Native KTF method failed: {x}");
+                        jvm_clone.exception("net/wie/WieError", &x.to_string()).await
+                    }
                 })
             })
             .await

@@ -2,28 +2,14 @@ import { WieWeb } from "@pkg";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Settings, createIcons } from "lucide";
 
 import { AppMetadata } from "./app_library_store";
+import { bindGameInput } from "./game_input";
 import { SettingsController } from "./settings";
+import { installCpuProfile } from "./cpu_profile";
+import { installCpuThroughput } from "./cpu_throughput";
 
-const KEY_MAP: Record<string, string> = {
-  Digit1: "1",
-  Digit2: "2",
-  Digit3: "3",
-  KeyQ: "4",
-  KeyW: "5",
-  KeyE: "6",
-  KeyA: "7",
-  KeyS: "8",
-  KeyD: "9",
-  KeyZ: "*",
-  KeyX: "0",
-  KeyC: "#",
-  Backspace: "CLR",
-  ArrowUp: "UP",
-  ArrowLeft: "LEFT",
-  ArrowRight: "RIGHT",
-  ArrowDown: "DOWN",
-  Space: "OK",
-};
+declare const __WIE_CPU_PROFILING__: boolean;
+declare const __WIE_CPU_THROUGHPUT__: boolean;
+
 const icons = {
   ArrowDown,
   ArrowLeft,
@@ -41,69 +27,26 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
 
   canvas.width = 240;
   canvas.height = 320;
+  let screenWidth = canvas.width;
+  let screenHeight = canvas.height;
+  playerView.style.setProperty("--screen-ratio", String(screenWidth / screenHeight));
   const abortController = new AbortController();
   const wieWeb = new WieWeb(app.filename, archive, canvas, fontData);
+  const removeCpuProfile = __WIE_CPU_PROFILING__ ? installCpuProfile(wieWeb) : undefined;
+  const removeCpuThroughput = __WIE_CPU_THROUGHPUT__ ? installCpuThroughput(wieWeb) : undefined;
   const unsubscribePcmVolume = settings.onPcmVolumeChange((volume) => wieWeb.set_pcm_volume(volume));
   let running = true;
 
   wieWeb.set_pcm_volume(settings.pcmVolume);
   playerTitle.textContent = app.title;
   createIcons({ icons, root: playerView });
+  const input = bindGameInput(playerView, wieWeb);
 
   backToLibrary.addEventListener("click", () => exit(), { signal: abortController.signal });
-  appSettings.addEventListener("click", settings.open, { signal: abortController.signal });
-
-  for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-key]")) {
-    const key = button.dataset.key!;
-    button.addEventListener(
-      "pointerdown",
-      (event) => {
-        event.preventDefault();
-        button.setPointerCapture(event.pointerId);
-        wieWeb.key_down(key);
-      },
-      { signal: abortController.signal },
-    );
-    const releaseKey = (event: PointerEvent) => {
-      event.preventDefault();
-      wieWeb.key_up(key);
-    };
-    button.addEventListener("pointerup", releaseKey, { signal: abortController.signal });
-    button.addEventListener("pointercancel", releaseKey, { signal: abortController.signal });
-  }
-
-  document.addEventListener(
-    "keydown",
-    (event) => {
-      if (event.target instanceof HTMLElement && event.target.closest("dialog")) {
-        return;
-      }
-
-      const key = KEY_MAP[event.code];
-      if (key) {
-        event.preventDefault();
-        if (!event.repeat) {
-          wieWeb.key_down(key);
-        }
-      }
-    },
-    { signal: abortController.signal },
-  );
-  document.addEventListener(
-    "keyup",
-    (event) => {
-      if (event.target instanceof HTMLElement && event.target.closest("dialog")) {
-        return;
-      }
-
-      const key = KEY_MAP[event.code];
-      if (key) {
-        event.preventDefault();
-        wieWeb.key_up(key);
-      }
-    },
-    { signal: abortController.signal },
-  );
+  appSettings.addEventListener("click", () => {
+    input.releaseAll();
+    settings.open();
+  }, { signal: abortController.signal });
 
   const update = () => {
     if (!running) {
@@ -112,6 +55,15 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
 
     try {
       wieWeb.update();
+      if (canvas.width !== screenWidth || canvas.height !== screenHeight) {
+        screenWidth = canvas.width;
+        screenHeight = canvas.height;
+        playerView.style.setProperty("--screen-ratio", String(screenWidth / screenHeight));
+      }
+      if (wieWeb.has_exited()) {
+        exit();
+        return;
+      }
       requestAnimationFrame(update);
     } catch (error) {
       exit(error);
@@ -121,8 +73,11 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
 
   return () => {
     running = false;
+    input.dispose();
     abortController.abort();
     unsubscribePcmVolume();
+    removeCpuProfile?.();
+    removeCpuThroughput?.();
     wieWeb.free();
   };
 };

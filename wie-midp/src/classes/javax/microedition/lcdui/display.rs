@@ -888,6 +888,7 @@ impl Display {
             let platform = context.system().platform();
             let screen = platform.screen();
 
+            tracing::debug!("Display paint complete {this:?}");
             screen.paint(&*image);
         }
         jvm.collect_garbage()?;

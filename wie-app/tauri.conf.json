@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "wie",
-  "version": "0.1.0",
-  "identifier": "net.dlunch.wie",
+  "productName": "GOmul",
+  "version": "0.1.1",
+  "identifier": "io.github.invi-si.gomul",
   "build": {
     "frontendDist": "../wie-web/dist",
     "devUrl": "http://localhost:8080",
@@ -12,9 +12,10 @@
   "app": {
     "windows": [
       {
-        "title": "wie",
-        "width": 800,
-        "height": 600,
+        "title": "GOmul",
+        "width": 1100,
+        "height": 760,
+        "dragDropEnabled": false,
         "resizable": true,
         "fullscreen": false
       }
@@ -33,6 +34,9 @@
   },
   "bundle": {
     "active": true,
+    "shortDescription": "Unofficial launcher built on WIE by dlunch and contributors",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
     "targets": "all",
     "icon": ["icons/icon.png", "icons/Square310x310Logo.png", "icons/icon.icns", "icons/icon.ico"]
   }

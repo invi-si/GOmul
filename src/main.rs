@@ -228,6 +228,9 @@ fn start_with_midi_device(filename: &str, options: Options, midi_device: Option<
     };
 
     let mut key_events = HashMap::new();
+    let input_profile = std::env::var_os("WIE_INPUT_PROFILE").is_some();
+    let mut tick_samples = Vec::with_capacity(256);
+    let mut tick_report = std::time::Instant::now();
     window.run(move |event| {
         match event {
             WindowCallbackEvent::Update => {
@@ -243,13 +246,25 @@ fn start_with_midi_device(filename: &str, options: Options, midi_device: Option<
                     }
                 }
 
-                emulator.tick()?
+                let started = input_profile.then(std::time::Instant::now);
+                emulator.tick()?;
+                if let Some(started) = started {
+                    tick_samples.push(started.elapsed().as_micros() as u64);
+                    if tick_report.elapsed().as_secs() >= 2 {
+                        tick_samples.sort_unstable();
+                        let n = tick_samples.len();
+                        tracing::info!(target: "wie_input", samples=n, median_us=tick_samples[n/2], p95_us=tick_samples[(n-1)*95/100], max_us=tick_samples[n-1], "host_tick");
+                        tick_samples.clear();
+                        tick_report = std::time::Instant::now();
+                    }
+                }
             }
             WindowCallbackEvent::Redraw => emulator.handle_event(Event::Redraw),
             WindowCallbackEvent::Keydown(x) => {
                 if let Some(keycode) = convert_key(x) {
                     let entry = key_events.entry(keycode);
                     if let Entry::Vacant(entry) = entry {
+                        tracing::info!(target: "wie_input", ?keycode, "host_keydown");
                         emulator.handle_event(Event::Keydown(keycode));
 
                         let now = SystemTime::now();
@@ -263,6 +278,7 @@ fn start_with_midi_device(filename: &str, options: Options, midi_device: Option<
                     && key_events.contains_key(&keycode)
                 {
                     key_events.remove(&keycode);
+                    tracing::info!(target: "wie_input", ?keycode, "host_keyup");
                     emulator.handle_event(Event::Keyup(keycode));
                 }
             }

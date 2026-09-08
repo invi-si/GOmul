@@ -15,6 +15,10 @@ pub struct CliFilesystem {
 }
 
 impl CliFilesystem {
+    pub fn at_path(base_path: PathBuf) -> Self {
+        Self { base_path }
+    }
+
     pub fn new() -> Self {
         let base_dir = ProjectDirs::from("net", "dlunch", "wie").unwrap();
         Self {

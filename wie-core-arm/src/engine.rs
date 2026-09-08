@@ -1,4 +1,6 @@
 mod arm32_cpu;
+#[cfg(feature = "cpu-replay")]
+pub use arm32_cpu::replay as cpu_replay;
 #[cfg(not(target_arch = "wasm32"))]
 mod debugged_arm32_cpu;
 

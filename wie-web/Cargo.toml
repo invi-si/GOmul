@@ -7,6 +7,13 @@ description.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+experimental-thumb-blocks = ["wie-lgt/experimental-thumb-blocks"]
+experimental-pc-local = ["wie-lgt/experimental-pc-local"]
+experimental-thumb-table = ["wie-lgt/experimental-thumb-table"]
+cpu-profiling = ["dep:wie-core-arm", "dep:serde_json", "wie-core-arm/cpu-profiling", "wie-lgt/cpu-profiling"]
+cpu-throughput = ["dep:wie-core-arm", "dep:serde_json", "wie-core-arm/cpu-throughput", "wie-lgt/cpu-throughput"]
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
 
@@ -24,15 +31,18 @@ console_error_panic_hook = { version = "^0.1" }
 futures = { version = "^0.3", default-features = false, features = ["alloc"] }
 hashbrown = { version = "^0.17" }
 js-sys = { version = "^0.3" }
+serde_json = { version = "^1", optional = true }
+log = { version = "0.4", features = ["release_max_level_warn"] }
 time = { version = "^0.3", features = ["wasm-bindgen"] }
-tracing = { version = "^0.1", features = ["release_max_level_info"] }
+tracing = { version = "^0.1", features = ["release_max_level_warn"] }
 tracing-subscriber = { version = "^0.3", features = ["time"] }
 tracing-web = { version = "^0.1" }
 wasm-bindgen = { version = "^0.2" }
 wasm-bindgen-futures = { version = "^0.4" }
-web-sys = { version = "^0.3", features = ["HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "Window", "Navigator"] }
+web-sys = { version = "^0.3", features = ["HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "Window", "Navigator", "Performance"] }
 
 wie-backend = { workspace = true }
+wie-core-arm = { workspace = true, optional = true }
 wie-ktf = { workspace = true }
 wie-lgt = { workspace = true }
 wie-skt = { workspace = true }

@@ -36,6 +36,13 @@ class WasmPackPlugin {
       needsBuild = false;
       return new Promise<void>((resolve, reject) => {
         const args = ["build", this.crateDir, "--target", "bundler", dev ? "--dev" : "--release"];
+        const features = [];
+        if (process.env.WIE_CPU_PROFILING === "1") features.push("cpu-profiling");
+        if (process.env.WIE_CPU_THROUGHPUT === "1") features.push("cpu-throughput");
+        if (process.env.WIE_EXPERIMENTAL_THUMB_TABLE === "1") features.push("experimental-thumb-table");
+        if (process.env.WIE_EXPERIMENTAL_PC_LOCAL === "1") features.push("experimental-pc-local");
+        if (process.env.WIE_EXPERIMENTAL_THUMB_BLOCKS === "1") features.push("experimental-thumb-blocks");
+        if (features.length) args.push("--features", features.join(","));
         const proc = spawn("wasm-pack", args, { stdio: "inherit", env });
         proc.on("exit", code => code === 0 ? resolve() : reject(new Error(`wasm-pack exited with code ${code}`)));
         proc.on("error", reject);
@@ -103,6 +110,10 @@ const commonConfig = (mode: "development" | "production"): webpack.Configuration
     ],
   },
   plugins: [
+    new webpack.DefinePlugin({
+      __WIE_CPU_PROFILING__: JSON.stringify(process.env.WIE_CPU_PROFILING === "1"),
+      __WIE_CPU_THROUGHPUT__: JSON.stringify(process.env.WIE_CPU_THROUGHPUT === "1"),
+    }),
     new HtmlBundlerPlugin({
       entry: {
         index: {

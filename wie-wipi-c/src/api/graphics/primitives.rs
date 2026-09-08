@@ -119,6 +119,9 @@ pub fn draw_image(
     source_y: i32,
     clip: Clip,
 ) -> Result<()> {
+    if framebuffer.try_draw_image(context, x, y, width, height, image, source_x, source_y, clip)? {
+        return Ok(());
+    }
     write_canvas(context, framebuffer, |canvas| {
         canvas.draw(x, y, width, height, image, source_x, source_y, clip)
     })
@@ -136,9 +139,7 @@ pub fn copy_area(
     clip: Clip,
 ) -> Result<()> {
     let image = framebuffer.image(context)?;
-    write_canvas(context, framebuffer, |canvas| {
-        canvas.draw(x, y, width, height, &*image, source_x, source_y, clip)
-    })
+    draw_image(context, framebuffer, x, y, width, height, &*image, source_x, source_y, clip)
 }
 
 pub fn copy_framebuffer(
@@ -154,9 +155,7 @@ pub fn copy_framebuffer(
     clip: Clip,
 ) -> Result<()> {
     let image = source.image(context)?;
-    write_canvas(context, destination, |canvas| {
-        canvas.draw(x, y, width, height, &*image, source_x, source_y, clip)
-    })
+    draw_image(context, destination, x, y, width, height, &*image, source_x, source_y, clip)
 }
 
 pub fn draw_text(context: &mut dyn WIPICContext, framebuffer: &FrameBuffer, string: &str, x: i32, y: i32, color: Color, clip: Clip) -> Result<()> {
@@ -301,6 +300,38 @@ mod tests {
         assert_eq!(image.get_pixel(0, 0).r, 255);
         assert_eq!(image.get_pixel(1, 1).r, 255);
         assert_eq!(image.get_pixel(3, 3).r, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn overlapping_copy_uses_original_source_pixels_in_both_directions() -> Result<()> {
+        let clip = Clip {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 10,
+        };
+        for bpp in [16, 32] {
+            let mut context = TestContext::new();
+            let framebuffer = FrameBuffer::new(&mut context, 12, 10, bpp)?;
+            let mut reference_context = TestContext::new();
+            let reference = FrameBuffer::new(&mut reference_context, 12, 10, bpp)?;
+            let initial = (0..12 * 10 * (bpp / 8)).map(|i| (i * 31) as u8).collect::<alloc::vec::Vec<_>>();
+            framebuffer.write(&mut context, &initial)?;
+            reference.write(&mut reference_context, &initial)?;
+            for (x, y, sx, sy) in [(2, 1, 0, 0), (0, 0, 2, 1), (2, 0, 0, 1), (0, 1, 2, 0)] {
+                let source = reference.image(&mut reference_context)?;
+                let mut canvas = reference.canvas(&mut reference_context)?;
+                canvas.draw(x, y, 10, 9, &*source, sx, sy, clip);
+                canvas.flush()?;
+                super::copy_area(&mut context, &framebuffer, x, y, 10, 9, sx, sy, clip)?;
+                assert_eq!(
+                    framebuffer.data(&context)?,
+                    reference.data(&reference_context)?,
+                    "bpp={bpp}, {x},{y} <- {sx},{sy}"
+                );
+            }
+        }
         Ok(())
     }
 

@@ -95,6 +95,8 @@ pub mod test {
 
     pub struct TestContext {
         memory: [u8; TEST_MEMORY_SIZE],
+        bytes_read: core::sync::atomic::AtomicUsize,
+        bytes_written: usize,
         last_alloc: usize,
         system: Option<System>,
         resources: Vec<(String, Vec<u8>)>,
@@ -105,6 +107,8 @@ pub mod test {
         pub fn new() -> Self {
             Self {
                 memory: [0; TEST_MEMORY_SIZE],
+                bytes_read: core::sync::atomic::AtomicUsize::new(0),
+                bytes_written: 0,
                 last_alloc: TEST_ALLOC_START,
                 system: None,
                 resources: Vec::new(),
@@ -113,16 +117,23 @@ pub mod test {
 
         pub fn with_system(system: System) -> Self {
             Self {
-                memory: [0; TEST_MEMORY_SIZE],
-                last_alloc: TEST_ALLOC_START,
                 system: Some(system),
-                resources: Vec::new(),
+                ..Self::new()
             }
         }
 
         pub fn with_resource(mut self, name: &str, data: &[u8]) -> Self {
             self.resources.push((String::from(name), data.to_vec()));
             self
+        }
+
+        pub fn reset_io_counts(&mut self) {
+            self.bytes_read.store(0, core::sync::atomic::Ordering::Relaxed);
+            self.bytes_written = 0;
+        }
+
+        pub fn io_counts(&self) -> (usize, usize) {
+            (self.bytes_read.load(core::sync::atomic::Ordering::Relaxed), self.bytes_written)
         }
     }
 
@@ -182,6 +193,7 @@ pub mod test {
 
     impl ByteWrite for TestContext {
         fn write_bytes(&mut self, address: u32, data: &[u8]) -> wie_util::Result<()> {
+            self.bytes_written += data.len();
             self.memory[address as usize..(address + data.len() as u32) as usize].copy_from_slice(data);
 
             Ok(())
@@ -190,6 +202,7 @@ pub mod test {
 
     impl ByteRead for TestContext {
         fn read_bytes(&self, address: u32, result: &mut [u8]) -> wie_util::Result<usize> {
+            self.bytes_read.fetch_add(result.len(), core::sync::atomic::Ordering::Relaxed);
             result.copy_from_slice(&self.memory[address as usize..(address as usize + result.len())]);
 
             Ok(result.len())

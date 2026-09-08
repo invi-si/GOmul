@@ -1,0 +1,32 @@
+name: GOmul native Android prerelease build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Select installed NDK
+        run: echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Unit checks
+        run: |
+          cargo test -p wie-wipi-c -p wie-core-arm -p wie-lgt -p wie-ktf
+          python3 -m unittest discover -s tools/mac-checkpoints -v
+      - name: Build native APK and notices
+        run: ./wie-android/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GOmul-android-arm64-experimental
+          path: wie-android/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

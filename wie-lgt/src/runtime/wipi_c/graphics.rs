@@ -65,6 +65,7 @@ struct ResolvedContext {
     translation_x: i32,
     translation_y: i32,
     foreground: u32,
+    opaque_copy: bool,
 }
 
 pub fn init_process_state(core: &mut ArmCore, physical_width: u32, physical_height: u32) -> Result<()> {
@@ -221,6 +222,16 @@ fn presentation_image(image: &dyn Image, view: LgtGraphicsView, width: u32, heig
     Ok(VecImageBuffer::<ArgbPixel>::from_raw(width, height, pixels))
 }
 
+fn with_presentation(image: &dyn Image, view: LgtGraphicsView, width: u32, height: u32, paint: impl FnOnce(&dyn Image) -> Result<()>) -> Result<()> {
+    if view.x == 0 && view.y == 0 && view.width == width && view.height == height && image.width() == width && image.height() == height {
+        // A full physical view already has the required geometry. Keep its
+        // original pixel format instead of expanding it into an ARGB copy.
+        paint(image)
+    } else {
+        paint(&presentation_image(image, view, width, height)?)
+    }
+}
+
 fn alloc_record<T: Pod>(context: &mut dyn WIPICContext, value: T) -> Result<WIPICIndirectPtr> {
     let handle = context.alloc(size_of::<T>() as u32)?;
     let address = context.data_ptr(handle)?;
@@ -321,6 +332,7 @@ fn normalize_context(raw: LgtGraphicsContext, framebuffer: LgtFramebuffer, view:
         translation_x: raw.offset_x,
         translation_y: raw.offset_y.wrapping_add(adjust_y),
         foreground: raw.foreground,
+        opaque_copy: raw.alpha == 255 && raw.pixel_op == 0 && raw.xor_enabled == 0,
     }
 }
 
@@ -522,6 +534,37 @@ pub async fn set_context(context: &mut dyn WIPICContext, ptr_context: WIPICWord,
     write_generic(context, ptr_context, graphics)
 }
 
+/// LGT's context getter writes values through its third argument. The clip
+/// endpoints are exclusive at the API boundary, inclusive in the native record.
+pub async fn get_context(context: &mut dyn WIPICContext, ptr_context: WIPICWord, operation: WIPICWord, output: WIPICWord) -> Result<()> {
+    let graphics: LgtGraphicsContext = read_generic(context, ptr_context)?;
+    match operation {
+        0 => write_generic(
+            context,
+            output,
+            [
+                graphics.clip_x1,
+                graphics.clip_y1,
+                graphics.clip_x2.wrapping_add(1),
+                graphics.clip_y2.wrapping_add(1),
+            ],
+        ),
+        1 => write_generic(context, output, graphics.foreground),
+        2 => write_generic(context, output, graphics.background),
+        4 => write_generic(context, output, graphics.alpha),
+        5 => write_generic(context, output, graphics.pixel_op),
+        6 => write_generic(context, output, graphics.pixel_param),
+        7 => write_generic(context, output, graphics.font),
+        8 => write_generic(context, output, graphics.style),
+        9 => write_generic(context, output, graphics.xor_enabled),
+        10 => write_generic(context, output, [graphics.offset_x, graphics.offset_y]),
+        _ => {
+            tracing::warn!("Unsupported LGT graphics context query {operation}");
+            Ok(())
+        }
+    }
+}
+
 pub async fn put_pixel(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32, y: i32, ptr_graphics: WIPICWord) -> Result<()> {
     let resolved = resolve_framebuffer(context, dst)?;
     let graphics = resolve_context(context, &resolved, ptr_graphics)?;
@@ -551,16 +594,24 @@ pub async fn fill_rect(
     let resolved = resolve_framebuffer(context, dst)?;
     let graphics = resolve_context(context, &resolved, ptr_graphics)?;
     let color = resolved.framebuffer.pixel_to_color(graphics.foreground);
-    primitives::fill_rect(
-        context,
-        &resolved.framebuffer,
-        x.wrapping_add(graphics.translation_x),
-        y.wrapping_add(graphics.translation_y),
-        width as u32,
-        height as u32,
-        color,
-        graphics.clip,
-    )
+    let x = x.wrapping_add(graphics.translation_x);
+    let y = y.wrapping_add(graphics.translation_y);
+    if graphics.opaque_copy
+        && resolved.framebuffer.try_fill_opaque_rect(
+            context,
+            Clip {
+                x,
+                y,
+                width: width as u32,
+                height: height as u32,
+            },
+            color,
+            graphics.clip,
+        )?
+    {
+        return Ok(());
+    }
+    primitives::fill_rect(context, &resolved.framebuffer, x, y, width as u32, height as u32, color, graphics.clip)
 }
 
 pub async fn draw_line(
@@ -866,10 +917,11 @@ pub async fn flush_lcd(
     let resolved = resolve_framebuffer(context, source)?;
     let image = resolved.framebuffer.image(context)?;
     let (_, state) = state(context)?;
-    let presented = presentation_image(&*image, resolved.view, state.physical_width, state.physical_height)?;
-    resize_presentation(context, state.physical_width, state.physical_height)?;
-    context.system().platform().screen().paint(&presented);
-    Ok(())
+    with_presentation(&*image, resolved.view, state.physical_width, state.physical_height, |presented| {
+        resize_presentation(context, state.physical_width, state.physical_height)?;
+        context.system().platform().screen().paint(presented);
+        Ok(())
+    })
 }
 
 pub async fn get_display_info(context: &mut dyn WIPICContext, kind: WIPICWord, output: WIPICWord) -> Result<WIPICWord> {
@@ -947,7 +999,7 @@ pub async fn get_image_property(context: &mut dyn WIPICContext, ptr_image: WIPIC
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
+    use alloc::{vec, vec::Vec};
 
     use futures::FutureExt;
     use wie_core_arm::{Allocator, ArmCore};
@@ -955,9 +1007,9 @@ mod tests {
 
     use super::{
         DISPLAY_PROPERTIES_ROOT, GRAPHICS_STATE_ROOT, LgtDisplayProperties, LgtFramebuffer, LgtGraphicsContext, LgtGraphicsState, LgtGraphicsView,
-        application_y, init_process_state, normalize_context, presentation_image, set_display_property,
+        application_y, init_process_state, normalize_context, presentation_image, set_display_property, with_presentation,
     };
-    use wie_backend::canvas::{ArgbPixel, Image, PixelType, VecImageBuffer};
+    use wie_backend::canvas::{ArgbPixel, Image, PixelType, Rgb565Pixel, VecImageBuffer};
 
     #[test]
     fn process_state_initializes_once_for_the_clet_lifecycle() -> Result<()> {
@@ -1018,6 +1070,83 @@ mod tests {
         assert_eq!(ArgbPixel::from_color(presented.get_pixel(0, 1)), 0xff000003);
         assert_eq!(ArgbPixel::from_color(presented.get_pixel(1, 2)), 0xff000006);
         assert_eq!(ArgbPixel::from_color(presented.get_pixel(1, 3)), 0xff000000);
+    }
+
+    #[test]
+    fn full_presentation_borrows_rgb565_and_argb_without_changing_pixels() -> Result<()> {
+        let rgb565 = VecImageBuffer::<Rgb565Pixel>::from_raw(3, 2, vec![0, 0xffff, 0xf800, 0x07e0, 0x001f, 0x1234]);
+        let argb = VecImageBuffer::<ArgbPixel>::from_raw(3, 2, vec![0, 0xffffffff, 0x12ff0000, 0x3400ff00, 0x560000ff, 0x78123456]);
+        let view = LgtGraphicsView {
+            ptr_backing: 0,
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 2,
+        };
+        for source in [&rgb565 as &dyn Image, &argb as &dyn Image] {
+            let mut expected = Vec::new();
+            presentation_image(source, view, 3, 2)?.write_rgba(&mut expected);
+            with_presentation(source, view, 3, 2, |presented| {
+                assert!(core::ptr::eq(presented, source));
+                let mut actual = Vec::new();
+                presented.write_rgba(&mut actual);
+                assert_eq!(actual, expected);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cropped_presentation_preserves_centering_and_opaque_black_padding() -> Result<()> {
+        let source = VecImageBuffer::<ArgbPixel>::from_raw(3, 2, vec![0x11000001, 0x22000002, 0x33000003, 0x44000004, 0x55000005, 0x66000006]);
+        let view = LgtGraphicsView {
+            ptr_backing: 0,
+            x: 1,
+            y: 0,
+            width: 1,
+            height: 2,
+        };
+        with_presentation(&source, view, 3, 4, |presented| {
+            assert_eq!((presented.width(), presented.height()), (3, 4));
+            assert!(!core::ptr::eq(presented, &source as &dyn Image));
+            let pixels: Vec<u32> = presented.colors().into_iter().map(ArgbPixel::from_color).collect();
+            assert_eq!(
+                pixels,
+                vec![
+                    0xff000000, 0xff000000, 0xff000000, 0xff000000, 0x22000002, 0xff000000, 0xff000000, 0x55000005, 0xff000000, 0xff000000,
+                    0xff000000, 0xff000000,
+                ]
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn invalid_presentation_never_reaches_the_screen() {
+        let source = VecImageBuffer::<Rgb565Pixel>::new(3, 2);
+        for (x, y, width, height, physical_width, physical_height) in [
+            (-1, 0, 3, 2, 3, 2),
+            (0, -1, 3, 2, 3, 2),
+            (1, 0, 3, 2, 3, 2),
+            (0, 1, 3, 2, 3, 2),
+            (0, 0, 3, 2, 2, 2),
+            (0, 0, 3, 2, 3, 1),
+        ] {
+            let view = LgtGraphicsView {
+                ptr_backing: 0,
+                x,
+                y,
+                width,
+                height,
+            };
+            assert!(
+                with_presentation(&source, view, physical_width, physical_height, |_| {
+                    panic!("invalid presentation reached the screen")
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1091,5 +1220,16 @@ mod tests {
         assert_eq!(normalized.translation_x, 3);
         assert_eq!(normalized.translation_y, 28);
         assert_eq!(normalized.foreground, 0xf800);
+        assert!(normalized.opaque_copy);
+
+        for (alpha, pixel_op, xor_enabled) in [(0, 0, 0), (128, 0, 0), (255, 1, 0), (255, 0x1234, 0), (255, 0, 1)] {
+            let raw = LgtGraphicsContext {
+                alpha,
+                pixel_op,
+                xor_enabled,
+                ..raw
+            };
+            assert!(!normalize_context(raw, framebuffer, view, state).opaque_copy);
+        }
     }
 }

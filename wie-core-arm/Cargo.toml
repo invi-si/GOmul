@@ -6,6 +6,16 @@ license.workspace = true
 description.workspace = true
 repository.workspace = true
 
+[features]
+cpu-replay = ["arm32_cpu/serde-serialize"]
+experimental-thumb-inline = ["arm32_cpu/experimental-thumb-inline"]
+experimental-thumb-blocks = []
+experimental-pc-local = ["arm32_cpu/experimental-pc-local"]
+experimental-thumb-table = ["arm32_cpu/experimental-thumb-table"]
+cpu-throughput = []
+cpu-benchmark = []
+cpu-profiling = ["arm32_cpu/profiling"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytemuck = { workspace = true }
@@ -26,6 +36,7 @@ gdbstub_arch = { version = "^0.3" }
 crossbeam = { version = "^0.8" }
 
 [dev-dependencies]
+serde_json = "1.0"
 futures = { workspace = true, features = ["executor"] }
 futures-test = { workspace = true }
 test-utils = { workspace = true }

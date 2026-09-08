@@ -1,8 +1,10 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/arm32_cpu"]
 
 members = [
     "wie-app",
+    "wie-android",
     "wie-backend",
     "wie-util",
     "wie-core-arm",
@@ -15,9 +17,14 @@ members = [
     "wie-lgt",
     "wie-skt",
     "wie-web",
+    "tools/cpu-bench",
 ]
 
 default-members = ["."]
+
+[patch.crates-io]
+jvm = { path = "vendor/jvm" }
+arm32_cpu = { path = "vendor/arm32_cpu" }
 
 [profile.dev.package.wie-core-arm]
 opt-level = 1
@@ -33,7 +40,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "WIPI and J2ME emulator components"
-repository = "https://github.com/dlunch/wie"
+repository = "https://github.com/invi-si/GOmul"
 
 [workspace.dependencies]
 anyhow = { version = "^1.0" }
@@ -85,7 +92,12 @@ description = "WIPI and J2ME emulator"
 repository.workspace = true
 exclude = ["docs"]
 
+[features]
+# Optional production build: remove instruction-level log::trace paths.
+release-no-trace = ["log/release_max_level_debug"]
+
 [dependencies]
+log = "0.4"
 async-trait = { workspace = true }
 tracing = { workspace = true }
 

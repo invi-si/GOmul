@@ -56,7 +56,9 @@ async fn handle_wipic_svc(core: &mut ArmCore, (system, jvm): &mut (System, Jvm),
         WIPICSvcId::GetFramebufferBpp => graphics::get_framebuffer_bpp.into_body(),
         WIPICSvcId::Printk => kernel::printk.into_body(),
         WIPICSvcId::Sprintk => kernel::sprintk.into_body(),
-        WIPICSvcId::Unk13 => unk13.into_body(),
+        // Native callers use this slot after saving settings for a restart and
+        // when the main loop stops. The original API name is not confirmed.
+        WIPICSvcId::RequestExit => kernel::exit.into_body(),
         WIPICSvcId::Unk1 => unk1.into_body(),
         WIPICSvcId::Exit => kernel::exit.into_body(),
         WIPICSvcId::GetProgramName => kernel::get_program_name.into_body(),
@@ -81,6 +83,7 @@ async fn handle_wipic_svc(core: &mut ArmCore, (system, jvm): &mut (System, Jvm),
         WIPICSvcId::CreateOffscreenFramebuffer => graphics::create_offscreen_framebuffer.into_body(),
         WIPICSvcId::InitContext => graphics::init_context.into_body(),
         WIPICSvcId::SetContext => graphics::set_context.into_body(),
+        WIPICSvcId::GetContext => graphics::get_context.into_body(),
         WIPICSvcId::PutPixel => graphics::put_pixel.into_body(),
         WIPICSvcId::DrawLine => graphics::draw_line.into_body(),
         WIPICSvcId::DrawRect => graphics::draw_rect.into_body(),
@@ -106,10 +109,10 @@ async fn handle_wipic_svc(core: &mut ArmCore, (system, jvm): &mut (System, Jvm),
         WIPICSvcId::CreateImage => graphics::create_image.into_body(),
         WIPICSvcId::Unk0 => unk0.into_body(),
         WIPICSvcId::Unk11 => unk11.into_body(),
-        WIPICSvcId::Unk3 => unk3.into_body(),
-        WIPICSvcId::Unk4 => unk4.into_body(),
-        WIPICSvcId::Unk7 => unk7.into_body(),
-        WIPICSvcId::Unk6 => unk6.into_body(),
+        WIPICSvcId::InputModeCount => input_mode_count.into_body(),
+        WIPICSvcId::InputModes => input_modes.into_body(),
+        WIPICSvcId::SetInputMode => set_input_mode.into_body(),
+        WIPICSvcId::GetInputMode => get_input_mode.into_body(),
         WIPICSvcId::TimeNow => time_now.into_body(),
         WIPICSvcId::TimeComponent => time_component.into_body(),
         WIPICSvcId::TimeConvert => time_convert.into_body(),
@@ -124,10 +127,12 @@ async fn handle_wipic_svc(core: &mut ArmCore, (system, jvm): &mut (System, Jvm),
         WIPICSvcId::DeleteRecord => database::delete_database.into_body(),
         WIPICSvcId::ListRecord => database::list_record.into_body(),
         WIPICSvcId::UpdateRecord => database::update_record.into_body(),
+        WIPICSvcId::AvailableDatabaseStorage => database::list_databases.into_body(),
         WIPICSvcId::SelectRecord => database::select_record.into_body(),
         WIPICSvcId::Unk8 => database::exists_database.into_body(),
         WIPICSvcId::Connect => net::connect.into_body(),
         WIPICSvcId::Close => net::close.into_body(),
+        WIPICSvcId::HostToNetworkShort => host_to_network_short.into_body(),
         WIPICSvcId::SocketClose => net::socket_close.into_body(),
         WIPICSvcId::ClipCreate => media::clip_create.into_body(),
         WIPICSvcId::ClipFree => media::clip_free.into_body(),
@@ -259,34 +264,45 @@ async fn unk2(context: &mut dyn WIPICContext) -> Result<u32> {
     Ok(result)
 }
 
-async fn unk3(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk3({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+// WIPI mode discovery returns a count and a char** table, not a handle.
+// The table and current selection live in guest global memory.
+// 0x7fff1010..0x7fff101c belongs to the display properties record.
+const INPUT_MODE_TABLE: u32 = 0x7fff1040;
+const INPUT_MODE_STRINGS: u32 = INPUT_MODE_TABLE + 8;
+const INPUT_MODE_CURRENT: u32 = INPUT_MODE_TABLE + 20;
 
+// ARM guests are little-endian; network byte order is big-endian.
+async fn host_to_network_short(_context: &mut dyn WIPICContext, value: u32) -> Result<u32> {
+    Ok((value as u16).swap_bytes() as u32)
+}
+
+async fn input_mode_count(_context: &mut dyn WIPICContext) -> Result<u32> {
+    Ok(2)
+}
+
+async fn input_modes(context: &mut dyn WIPICContext) -> Result<u32> {
+    write_generic(context, INPUT_MODE_TABLE, INPUT_MODE_STRINGS)?;
+    write_generic(context, INPUT_MODE_TABLE + 4, INPUT_MODE_STRINGS + 5)?;
+    context.write_bytes(INPUT_MODE_STRINGS, b"EN/L\0EN/S\0")?;
+    Ok(INPUT_MODE_TABLE)
+}
+
+async fn set_input_mode(context: &mut dyn WIPICContext, mode: i32) -> Result<i32> {
+    if !(0..2).contains(&mode) {
+        return Ok(-22);
+    }
+    write_generic(context, INPUT_MODE_CURRENT, mode)?;
     Ok(0)
 }
 
-async fn unk4(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk4({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    Ok(0)
+async fn get_input_mode(context: &mut dyn WIPICContext) -> Result<i32> {
+    read_generic(context, INPUT_MODE_CURRENT)
 }
 
 async fn unk5(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
     tracing::warn!("stub unk5({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     // media
-
-    Ok(0)
-}
-
-async fn unk6(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk6({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    Ok(0)
-}
-
-async fn unk7(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk7({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     Ok(0)
 }
@@ -381,14 +397,6 @@ async fn unk11(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u
     Ok(0)
 }
 
-async fn unk13(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk13({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    // kernel
-
-    Ok(0)
-}
-
 async fn unk14(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
     tracing::warn!("stub unk14({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
@@ -411,4 +419,130 @@ async fn unk16(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u
     // misc
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{boxed::Box, sync::Arc};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use test_utils::{TestPlatform, TestPlatformEvent};
+    use wie_backend::{DefaultTaskRunner, System};
+    use wie_core_arm::{Allocator, ArmCore};
+    use wie_util::Result;
+
+    use super::register_wipic_svc_handler;
+    use crate::runtime::{LgtJvmSupport, SVC_CATEGORY_WIPIC};
+
+    #[test]
+    fn request_exit_svc_notifies_platform() -> Result<()> {
+        let exit_count = Arc::new(AtomicU32::new(0));
+        let observed_exits = exit_count.clone();
+        let platform = TestPlatform::with_event_handler(move |event| {
+            if matches!(event, TestPlatformEvent::Exit) {
+                observed_exits.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let mut system = System::new(Box::new(platform), "", "", DefaultTaskRunner);
+        let system_clone = system.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+
+        system.spawn(async move || {
+            let mut core = ArmCore::new(false, None)?;
+            Allocator::init(&mut core)?;
+            let mut registers = core.save_context();
+            registers.sp = Allocator::alloc(&mut core, 0x100)? + 0x100;
+            core.restore_context(&registers);
+
+            let jvm = LgtJvmSupport::init(&mut core, &system_clone, None).await?;
+            register_wipic_svc_handler(&mut core, &system_clone, &jvm)?;
+            let request_exit = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x68u32)?;
+            let _: () = core.run_function(request_exit, &[0]).await?;
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+
+        for _ in 0..1000 {
+            system.tick()?;
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        assert!(done.load(Ordering::Relaxed), "exit request did not finish");
+        assert_eq!(exit_count.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+    #[test]
+    fn input_mode_and_storage_svcs_use_guest_memory() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let system_clone = system.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        system.spawn(async move || {
+            use wie_util::{read_generic, read_null_terminated_string_bytes};
+            let mut core = ArmCore::new(false, None)?;
+            Allocator::init(&mut core)?;
+            let mut registers = core.save_context();
+            registers.sp = Allocator::alloc(&mut core, 0x100)? + 0x100;
+            core.restore_context(&registers);
+            let jvm = LgtJvmSupport::init(&mut core, &system_clone, None).await?;
+            register_wipic_svc_handler(&mut core, &system_clone, &jvm)?;
+            // Input-mode discovery must not overwrite display properties.
+            wie_util::write_generic(&mut core, 0x7fff1010, [240u32, 320, 1])?;
+            let count = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x12cu32)?;
+            let modes = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x12du32)?;
+            let set = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x12eu32)?;
+            let get = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x12fu32)?;
+            let storage = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x19cu32)?;
+            assert_eq!(core.run_function::<u32>(count, &[]).await?, 2);
+            let table = core.run_function::<u32>(modes, &[]).await?;
+            let first: u32 = read_generic(&core, table)?;
+            let second: u32 = read_generic(&core, table + 4)?;
+            assert_eq!(read_null_terminated_string_bytes(&core, first)?, b"EN/L");
+            assert_eq!(read_null_terminated_string_bytes(&core, second)?, b"EN/S");
+            assert_eq!(core.run_function::<u32>(set, &[1]).await?, 0);
+            assert_eq!(core.run_function::<u32>(get, &[]).await?, 1);
+            assert_eq!(core.run_function::<u32>(set, &[2]).await? as i32, -22);
+            assert_eq!(core.run_function::<u32>(modes, &[]).await?, table);
+            assert_eq!(core.run_function::<u32>(get, &[]).await?, 1);
+            assert_eq!(core.run_function::<u32>(storage, &[]).await?, 1024 * 1024);
+            let htons = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x385u32)?;
+            for (input, expected) in [(0, 0), (0x3b1d, 0x1d3b), (0xffff0001, 0x100)] {
+                assert_eq!(core.run_function::<u32>(htons, &[input]).await?, expected);
+            }
+            assert_eq!(read_generic::<[u32; 3], _>(&core, 0x7fff1010)?, [240, 320, 1]);
+            let init = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0xcdu32)?;
+            let set = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0xceu32)?;
+            let get = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0xcfu32)?;
+            let ctx = Allocator::alloc(&mut core, 56)?;
+            let out = Allocator::alloc(&mut core, 24)?;
+            core.run_function::<()>(init, &[ctx]).await?;
+            core.run_function::<()>(get, &[ctx, 4, out]).await?;
+            assert_eq!(read_generic::<u32, _>(&core, out)?, 255);
+            for (op, value) in [(1, 0x123456), (2, 0x987654), (4, 127), (5, 2), (6, 128), (7, 3), (8, 5), (9, 1), (9, 0)] {
+                core.run_function::<()>(set, &[ctx, op, value]).await?;
+                core.run_function::<()>(get, &[ctx, op, out]).await?;
+                assert_eq!(read_generic::<u32, _>(&core, out)?, value);
+            }
+            for (op, values) in [(0, [-7i32, 3, 200, 240]), (10, [-5, 8, 0, 0])] {
+                wie_util::write_generic(&mut core, out, values)?;
+                core.run_function::<()>(set, &[ctx, op, out]).await?;
+                wie_util::write_generic(&mut core, out, [0i32; 4])?;
+                core.run_function::<()>(get, &[ctx, op, out]).await?;
+                assert_eq!(read_generic::<[i32; 4], _>(&core, out)?, values);
+            }
+            assert!(core.run_function::<()>(get, &[ctx, 4, 0]).await.is_err());
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        for _ in 0..1000 {
+            system.tick()?;
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        assert!(done.load(Ordering::Relaxed));
+        Ok(())
+    }
 }

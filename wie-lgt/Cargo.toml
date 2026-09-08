@@ -6,6 +6,14 @@ license.workspace = true
 description.workspace = true
 repository.workspace = true
 
+[features]
+experimental-thumb-inline = ["wie-core-arm/experimental-thumb-inline"]
+experimental-thumb-blocks = ["wie-core-arm/experimental-thumb-blocks"]
+experimental-pc-local = ["wie-core-arm/experimental-pc-local"]
+experimental-thumb-table = ["wie-core-arm/experimental-thumb-table"]
+cpu-profiling = ["wie-core-arm/cpu-profiling"]
+cpu-throughput = ["wie-core-arm/cpu-throughput"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytemuck = { workspace = true }

@@ -212,10 +212,10 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "arm32_cpu"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "359e8364b274abfc953f0b9b0aaf7cf7123cb9a01a6dc92d8c6e1d9439405d60"
 dependencies = [
  "log",
+ "serde",
+ "serde-big-array",
 ]
 
 [[package]]
@@ -2466,8 +2466,6 @@ dependencies = [
 [[package]]
 name = "jvm"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556c40b20363ed43473a92f24053b1fde770fae31a06bf187e55b2ae4f5ac443"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -4157,6 +4155,15 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-big-array"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd31f59f6fe2b0c055371bb2f16d7f0aa7d8881676c04a55b1596d1a17cd10a4"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -6051,6 +6058,7 @@ dependencies = [
  "directories",
  "fast_image_resize",
  "getrandom 0.4.3",
+ "log",
  "midir",
  "rodio",
  "softbuffer",
@@ -6064,6 +6072,28 @@ dependencies = [
  "wie-skt",
  "wie-util",
  "winit",
+]
+
+[[package]]
+name = "wie-android"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "directories",
+ "jni 0.21.1",
+ "log",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "wie-backend",
+ "wie-core-arm",
+ "wie-cpu-bench",
+ "wie-j2me",
+ "wie-ktf",
+ "wie-lgt",
+ "wie-skt",
+ "wie-util",
 ]
 
 [[package]]
@@ -6111,12 +6141,24 @@ dependencies = [
  "gdbstub_arch",
  "md5",
  "serde",
+ "serde_json",
  "spin",
  "test-utils",
  "toml 1.1.3+spec-1.1.0",
  "tracing",
  "wie-backend",
  "wie-util",
+]
+
+[[package]]
+name = "wie-cpu-bench"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "wie-core-arm",
 ]
 
 [[package]]
@@ -6295,6 +6337,8 @@ dependencies = [
  "futures",
  "hashbrown 0.17.1",
  "js-sys",
+ "log",
+ "serde_json",
  "time",
  "tracing",
  "tracing-subscriber",
@@ -6303,6 +6347,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wie-backend",
+ "wie-core-arm",
  "wie-j2me",
  "wie-ktf",
  "wie-lgt",

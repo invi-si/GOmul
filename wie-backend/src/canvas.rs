@@ -52,6 +52,18 @@ pub trait Image: Send {
     fn get_pixel(&self, x: i32, y: i32) -> Color;
     fn raw(&self) -> Cow<'_, [u8]>;
     fn colors(&self) -> Vec<Color>;
+
+    /// Replace the output with packed RGBA bytes while retaining its allocation.
+    fn write_rgba(&self, output: &mut Vec<u8>) {
+        output.clear();
+        output.reserve(self.width() as usize * self.height() as usize * 4);
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let color = self.get_pixel(x as i32, y as i32);
+                output.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        }
+    }
 }
 
 pub trait ImageBuffer: Send {
@@ -273,6 +285,15 @@ where
 
     fn colors(&self) -> Vec<Color> {
         self.data.iter().map(|&x| T::to_color(x)).collect()
+    }
+
+    fn write_rgba(&self, output: &mut Vec<u8>) {
+        output.clear();
+        output.reserve(self.data.len() * 4);
+        for &raw in &self.data {
+            let color = T::to_color(raw);
+            output.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
     }
 }
 
@@ -955,7 +976,63 @@ mod tests {
 
     use crate::canvas::{Clip, Image, ImageBuffer, ImageBufferCanvas};
 
-    use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, VecImageBuffer};
+    use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, Rgb565Pixel, VecImageBuffer};
+
+    fn legacy_rgba(image: &dyn Image) -> Vec<u8> {
+        image
+            .colors()
+            .into_iter()
+            .flat_map(|color| [color.r, color.g, color.b, color.a])
+            .collect()
+    }
+
+    #[test]
+    fn rgba_output_matches_every_rgb565_color() {
+        let image = VecImageBuffer::<Rgb565Pixel>::from_raw(256, 256, (0..=u16::MAX).collect());
+        let mut output = Vec::new();
+        image.write_rgba(&mut output);
+        assert_eq!(output, legacy_rgba(&image));
+        assert_eq!(output.len(), 256 * 256 * 4);
+    }
+
+    #[test]
+    fn rgba_output_preserves_argb_alpha_and_reuses_storage_across_resizes() {
+        let image = VecImageBuffer::<ArgbPixel>::from_raw(2, 2, vec![0x00123456, 0x78765432, 0xffffffff, 0xff000000]);
+        let mut output = Vec::with_capacity(64);
+        let allocation = output.as_ptr();
+        image.write_rgba(&mut output);
+        assert_eq!(
+            output,
+            vec![0x12, 0x34, 0x56, 0, 0x76, 0x54, 0x32, 0x78, 255, 255, 255, 255, 0, 0, 0, 255]
+        );
+        assert_eq!(output, legacy_rgba(&image));
+
+        let smaller = VecImageBuffer::<Rgb565Pixel>::from_raw(1, 1, vec![0xf800]);
+        smaller.write_rgba(&mut output);
+        assert_eq!(output, vec![255, 0, 0, 255]);
+        assert_eq!(output.as_ptr(), allocation);
+
+        VecImageBuffer::<ArgbPixel>::new(0, 0).write_rgba(&mut output);
+        assert!(output.is_empty());
+        assert_eq!(output.as_ptr(), allocation);
+    }
+
+    #[test]
+    fn rgba_default_supports_images_without_packed_storage() {
+        let image = SharedImageBuffer::new(
+            2,
+            vec![
+                Color { r: 1, g: 2, b: 3, a: 4 },
+                Color { r: 5, g: 6, b: 7, a: 8 },
+                Color { r: 9, g: 10, b: 11, a: 12 },
+                Color { r: 13, g: 14, b: 15, a: 16 },
+            ],
+        );
+        let mut output = vec![255; 128];
+        image.write_rgba(&mut output);
+        assert_eq!(output, legacy_rgba(&image));
+        assert_eq!(output, (1..=16).collect::<Vec<u8>>());
+    }
 
     #[test]
     fn test_canvas() -> Result<()> {

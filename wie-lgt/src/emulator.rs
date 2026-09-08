@@ -39,6 +39,13 @@ pub struct LgtEmulator {
 }
 
 impl LgtEmulator {
+    /// A diagnostics-only controller; cloning this handle does not copy or
+    /// replace architectural CPU state.
+    #[cfg(any(feature = "cpu-profiling", feature = "cpu-throughput"))]
+    pub fn core_for_profiling(&self) -> ArmCore {
+        self.core.clone()
+    }
+
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>, options: Options) -> Result<Self> {
         let app_info = files
             .get("app_info")

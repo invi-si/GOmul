@@ -49,6 +49,7 @@ pub async fn load_native(
     let bss_size = parse_bss_size(filename)?;
 
     core.load(data, IMAGE_BASE, data.len() + bss_size as usize)?;
+    super::java::jvm_support::KtfJvmSupport::set_native_image(core, IMAGE_BASE, data.len() as u32 + bss_size)?;
 
     // Patterns target instruction encodings, which the guest self-rebase at
     // IMAGE_BASE+1 doesn't rewrite — so installing here is sound and skips a

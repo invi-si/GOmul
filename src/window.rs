@@ -1,6 +1,11 @@
 use alloc::sync::Arc;
 use core::{fmt::Debug, fmt::Formatter, num::NonZeroU32};
-use std::{fmt, sync::RwLock, vec};
+use std::{
+    fmt,
+    sync::RwLock,
+    time::{Duration, Instant},
+    vec,
+};
 
 use fast_image_resize::ResizeAlg;
 use fast_image_resize::{PixelType, ResizeOptions, SrcCropping};
@@ -139,7 +144,7 @@ impl WindowImpl {
     where
         C: FnMut(WindowCallbackEvent) -> wie_util::Result<()> + 'static,
     {
-        self.event_loop.set_control_flow(ControlFlow::Poll);
+        self.event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now()));
 
         const DEFAULT_USER_SCALE_FACTOR: f64 = 1.0;
         let (width, height) = read_display_size(&self.display_size);
@@ -389,6 +394,12 @@ where
 {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
         self.callback(WindowCallbackEvent::Update, event_loop)
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Wake frequently enough for phone timers while allowing the host CPU
+        // to sleep between guest work. Input and redraw events wake us sooner.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(1)));
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {

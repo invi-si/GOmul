@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
+    "@types/picomatch": "^4.0.3",
     "@types/webpack": "^5.28.5",
     "copy-webpack-plugin": "^14.0.0"
   }

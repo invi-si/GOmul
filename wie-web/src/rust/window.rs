@@ -1,5 +1,8 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    cell::RefCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use wasm_bindgen::{Clamped, JsCast};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
@@ -9,6 +12,8 @@ use wie_util::Result;
 
 pub struct WindowImpl {
     canvas: HtmlCanvasElement,
+    context: CanvasRenderingContext2d,
+    rgba: RefCell<Vec<u8>>,
     should_redraw: Arc<AtomicBool>,
 }
 
@@ -17,7 +22,13 @@ unsafe impl Sync for WindowImpl {}
 
 impl WindowImpl {
     pub fn new(canvas: HtmlCanvasElement, should_redraw: Arc<AtomicBool>) -> Self {
-        Self { canvas, should_redraw }
+        let context = canvas.get_context("2d").unwrap().unwrap().dyn_into::<CanvasRenderingContext2d>().unwrap();
+        Self {
+            canvas,
+            context,
+            rgba: RefCell::new(Vec::new()),
+            should_redraw,
+        }
     }
 }
 
@@ -35,18 +46,11 @@ impl Screen for WindowImpl {
     }
 
     fn paint(&self, image: &dyn Image) {
-        let context = self
-            .canvas
-            .get_context("2d")
-            .unwrap()
-            .unwrap()
-            .dyn_into::<CanvasRenderingContext2d>()
-            .unwrap();
+        let mut rgba = self.rgba.borrow_mut();
+        image.write_rgba(&mut rgba);
+        let data = ImageData::new_with_u8_clamped_array_and_sh(Clamped(&rgba), self.width(), self.height()).unwrap();
 
-        let image_data = image.colors().into_iter().flat_map(|x| [x.r, x.g, x.b, x.a]).collect::<Vec<_>>();
-        let data = ImageData::new_with_u8_clamped_array_and_sh(Clamped(&image_data), self.width(), self.height()).unwrap();
-
-        context.put_image_data(&data, 0.0, 0.0).unwrap();
+        self.context.put_image_data(&data, 0.0, 0.0).unwrap();
     }
 
     fn width(&self) -> u32 {

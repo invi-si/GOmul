@@ -6,6 +6,10 @@ use spin::Mutex;
 use wie_backend::{ProfileCallback, ProfileSample, YieldFuture};
 use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
 
+#[cfg(feature = "cpu-profiling")]
+use crate::cpu_profile::{CoreProfileSnapshot, HostClock, ProfileMode, SvcSnapshot};
+#[cfg(feature = "cpu-throughput")]
+use crate::cpu_throughput::CpuThroughputSnapshot;
 use crate::{
     EmulatedFunction, ResultWriter, ThreadId,
     context::ArmCoreContext,
@@ -47,6 +51,8 @@ pub(crate) struct ArmCoreInner {
     svc_handlers: BTreeMap<u32, Arc<Box<dyn RegisteredFunction>>>,
     next_stub_address: u32,
     profile: Option<ProfileState>,
+    #[cfg(feature = "cpu-profiling")]
+    cpu_profile: (ProfileMode, HostClock, SvcSnapshot),
 }
 
 impl Drop for ArmCoreInner {
@@ -101,6 +107,8 @@ impl ArmCore {
             svc_handlers: BTreeMap::new(),
             next_stub_address: FUNCTIONS_BASE,
             profile,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profile: (ProfileMode::Off, || 0, SvcSnapshot::default()),
         };
 
         let result = Self {
@@ -115,6 +123,71 @@ impl ArmCore {
         }
 
         Ok(result)
+    }
+
+    /// Clear instruction throughput totals without changing guest state.
+    #[cfg(feature = "cpu-throughput")]
+    pub fn reset_cpu_throughput(&self) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let engine = inner
+            .engine
+            .as_any_mut()
+            .downcast_mut::<Arm32CpuEngine>()
+            .ok_or_else(|| WieError::FatalError("CPU throughput counters require the normal ARM engine without the GDB adapter".into()))?;
+        engine.reset_throughput();
+        Ok(())
+    }
+
+    /// Read instruction totals. This does not read a clock or execute guest code.
+    #[cfg(feature = "cpu-throughput")]
+    pub fn cpu_throughput_snapshot(&self) -> Result<CpuThroughputSnapshot> {
+        let inner = self.inner.lock();
+        let engine = inner
+            .engine
+            .as_any()
+            .downcast_ref::<Arm32CpuEngine>()
+            .ok_or_else(|| WieError::FatalError("CPU throughput counters are unavailable on this engine".into()))?;
+        Ok(engine.throughput_snapshot())
+    }
+
+    #[cfg(feature = "cpu-profiling")]
+    pub fn set_cpu_profiling(&self, mode: ProfileMode, mean_interval: u32, seed: u32, clock: HostClock) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let engine = inner
+            .engine
+            .as_any_mut()
+            .downcast_mut::<Arm32CpuEngine>()
+            .ok_or_else(|| WieError::FatalError("CPU profiling requires the normal ARM engine without the GDB adapter".into()))?;
+        engine.set_profiling(mode, mean_interval, seed, clock);
+        inner.cpu_profile = (mode, clock, SvcSnapshot::default());
+        Ok(())
+    }
+
+    #[cfg(feature = "cpu-profiling")]
+    pub fn reset_cpu_profiling(&self) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let engine = inner
+            .engine
+            .as_any_mut()
+            .downcast_mut::<Arm32CpuEngine>()
+            .ok_or_else(|| WieError::FatalError("CPU profiling is unavailable on this engine".into()))?;
+        engine.reset_profiling();
+        inner.cpu_profile.2 = SvcSnapshot::default();
+        Ok(())
+    }
+
+    #[cfg(feature = "cpu-profiling")]
+    pub fn cpu_profiling_snapshot(&self) -> Result<CoreProfileSnapshot> {
+        let inner = self.inner.lock();
+        let engine = inner
+            .engine
+            .as_any()
+            .downcast_ref::<Arm32CpuEngine>()
+            .ok_or_else(|| WieError::FatalError("CPU profiling is unavailable on this engine".into()))?;
+        Ok(CoreProfileSnapshot {
+            engine: engine.profiling_snapshot(),
+            svc: inner.cpu_profile.2,
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -207,6 +280,64 @@ impl ArmCore {
         inner.threads.keys().cloned().collect()
     }
 
+    /// Conservative guest roots for a non-moving, guest-heap object collector.
+    /// Snapshot the loaded image, registers and live portions of every ARM stack.
+    /// No guest instructions or callbacks run while this snapshot is taken.
+    pub fn native_heap_reference_candidates(&self, image_base: u32, image_size: u32) -> Result<Vec<usize>> {
+        let current = self.save_context();
+        let mut inner = self.inner.lock();
+        let mut roots = Vec::new();
+        let mut add = |word: u32| {
+            if (HEAP_BASE..HEAP_BASE + HEAP_SIZE).contains(&word) && word.is_multiple_of(4) {
+                roots.push(word as usize);
+            }
+        };
+        let contexts: Vec<_> = inner
+            .threads
+            .values()
+            .map(|thread| {
+                let end = (thread.stack_base + thread.stack_size) as u32;
+                let context = if (thread.stack_base as u32..=end).contains(&current.sp) {
+                    current.clone()
+                } else {
+                    thread.context.clone()
+                };
+                (context, thread.stack_base as u32, end)
+            })
+            .collect();
+        for context in core::iter::once(&current).chain(contexts.iter().map(|(context, _, _)| context)) {
+            for word in [
+                context.r0, context.r1, context.r2, context.r3, context.r4, context.r5, context.r6, context.r7, context.r8, context.sb, context.sl,
+                context.fp, context.ip, context.sp, context.lr, context.pc,
+            ] {
+                add(word);
+            }
+        }
+        let mut scan = |start: u32, size: u32| -> Result<()> {
+            let mut buffer = [0; 4096];
+            let mut offset = 0;
+            while offset < size {
+                let count = (size - offset).min(buffer.len() as u32) as usize;
+                inner.engine.mem_read(start + offset, count, &mut buffer[..count])?;
+                for word in buffer[..count].as_chunks::<4>().0 {
+                    add(u32::from_le_bytes(*word));
+                }
+                offset += count as u32;
+            }
+            Ok(())
+        };
+        scan(image_base, image_size)?;
+        for (context, base, end) in contexts {
+            if context.sp < base || context.sp > end || !context.sp.is_multiple_of(4) {
+                return Err(WieError::FatalError("Invalid native stack bounds during GC".into()));
+            }
+            scan(context.sp, end - context.sp)?;
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        Ok(roots)
+    }
+
     fn sample_profile(&self) {
         let mut inner = self.inner.lock();
         if inner.profile.is_none() {
@@ -286,6 +417,15 @@ impl ArmCore {
         loop {
             let result = {
                 let mut inner = self.inner.lock();
+                #[cfg(feature = "cpu-replay")]
+                {
+                    if let Some(result) = crate::cpu_replay::try_record(inner.engine.as_mut(), RUN_FUNCTION_LR, 10_000) {
+                        result?
+                    } else {
+                        inner.engine.run(RUN_FUNCTION_LR, 10_000)?
+                    }
+                }
+                #[cfg(not(feature = "cpu-replay"))]
                 inner.engine.run(RUN_FUNCTION_LR, 10_000)?
             };
 
@@ -312,7 +452,38 @@ impl ArmCore {
                     };
 
                     let mut self1 = self.clone();
+                    #[cfg(not(feature = "cpu-profiling"))]
                     function.call(&mut self1).await?;
+                    #[cfg(feature = "cpu-profiling")]
+                    {
+                        let profile_core = self.clone();
+                        {
+                            let mut inner = profile_core.inner.lock();
+                            if inner.cpu_profile.0 != ProfileMode::Off {
+                                inner.cpu_profile.2.calls += 1;
+                            }
+                        }
+                        let mut future = core::pin::pin!(function.call(&mut self1));
+                        core::future::poll_fn(|cx| {
+                            let clock = {
+                                let mut inner = profile_core.inner.lock();
+                                if inner.cpu_profile.0 != ProfileMode::Off {
+                                    inner.cpu_profile.2.polls += 1;
+                                }
+                                (inner.cpu_profile.0 == ProfileMode::Sampled).then_some(inner.cpu_profile.1)
+                            };
+                            let started = clock.map(|clock| clock());
+                            let result = future.as_mut().poll(cx);
+                            if let (Some(clock), Some(started)) = (clock, started) {
+                                let ended = clock();
+                                let mut inner = profile_core.inner.lock();
+                                inner.cpu_profile.2.poll_inclusive_ns += ended.saturating_sub(started);
+                                inner.cpu_profile.2.clock_regressions += u64::from(ended < started);
+                            }
+                            result
+                        })
+                        .await?;
+                    }
                 }
             }
         }
@@ -685,6 +856,40 @@ impl Drop for ThreadContextGuard {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_roots_snapshot_image_registers_and_live_stacks() -> Result<()> {
+        use wie_util::write_generic;
+        let mut core = ArmCore::new(false, None)?;
+        crate::Allocator::init(&mut core)?;
+        core.map(0x100000, 0x1000)?;
+        let mut thread = ThreadState::new(core.clone())?;
+        let end = (thread.stack_base + thread.stack_size) as u32;
+        thread.context.sp = end - 8;
+        thread.context.r8 = HEAP_BASE + 0x100;
+        write_generic(&mut core, end - 12, HEAP_BASE + 0x200)?; // dead stack area
+        write_generic(&mut core, end - 8, HEAP_BASE + 0x300)?;
+        write_generic(&mut core, end - 4, HEAP_BASE + 0x400)?;
+        write_generic(&mut core, 0x100000, HEAP_BASE + 0x500)?;
+        core.inner.lock().threads.insert(1, thread);
+        let roots = core.native_heap_reference_candidates(0x100000, 0x1000)?;
+        for offset in [0x100, 0x300, 0x400, 0x500] {
+            assert!(roots.contains(&((HEAP_BASE + offset) as usize)));
+        }
+        assert!(!roots.contains(&((HEAP_BASE + 0x200) as usize)));
+        let mut active = core.save_context();
+        active.sp = end - 4;
+        active.r5 = HEAP_BASE + 0x600;
+        core.restore_context(&active);
+        let roots = core.native_heap_reference_candidates(0x100000, 0x1000)?;
+        assert!(roots.contains(&((HEAP_BASE + 0x600) as usize)));
+        assert!(roots.contains(&((HEAP_BASE + 0x400) as usize)));
+        assert!(!roots.contains(&((HEAP_BASE + 0x300) as usize)));
+        assert!(!roots.contains(&((HEAP_BASE + 0x100) as usize)));
+        assert!(core.native_heap_reference_candidates(0x200000, 4).is_err());
+        core.delete_thread_context(1);
+        Ok(())
+    }
+
     async fn test_svc_handler(_core: &mut ArmCore, seen_id: &mut Option<u32>, id: crate::SvcId) -> Result<()> {
         *seen_id = Some(id.0);
 
@@ -723,5 +928,135 @@ mod tests {
             EngineRunResult::End => panic!("expected SVC, got end"),
             EngineRunResult::CountExhausted => panic!("expected SVC, got count exhausted"),
         }
+    }
+
+    #[cfg(feature = "cpu-profiling")]
+    mod profiling_regressions {
+        use super::*;
+        use ::core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+        static TICKS: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            TICKS.fetch_add(10, Ordering::Relaxed)
+        }
+        fn panic_clock() -> u64 {
+            panic!("untimed core observations read the host clock")
+        }
+
+        async fn pending_handler(_core: &mut ArmCore, calls: &mut Arc<AtomicU32>, id: crate::SvcId) -> Result<u32> {
+            calls.fetch_add(1, Ordering::Relaxed);
+            let mut pending = true;
+            ::core::future::poll_fn(|cx| {
+                if pending {
+                    pending = false;
+                    cx.waker().wake_by_ref();
+                    ::core::task::Poll::Pending
+                } else {
+                    ::core::task::Poll::Ready(())
+                }
+            })
+            .await;
+            Ok(id.0 + 9)
+        }
+
+        #[test]
+        fn normal_engine_profile_api_and_pending_svc_preserve_results_in_all_modes() {
+            for mode in [ProfileMode::Off, ProfileMode::Counts, ProfileMode::Sampled] {
+                let mut core = ArmCore::new(false, None).unwrap();
+                core.map(0x1000, 0x1000).unwrap();
+                let mut context = core.save_context();
+                context.sp = 0x1800;
+                core.restore_context(&context);
+                let calls = Arc::new(AtomicU32::new(0));
+                core.register_svc_handler(1, pending_handler, &calls).unwrap();
+                let stub = core.make_svc_stub(1, 7u32).unwrap();
+                core.set_cpu_profiling(mode, 1, 59, if mode == ProfileMode::Sampled { clock } else { panic_clock })
+                    .unwrap();
+                let result: u32 = futures::executor::block_on(core.run_function(stub, &[])).unwrap();
+                assert_eq!(result, 16);
+                assert_eq!(calls.load(Ordering::Relaxed), 1);
+                assert_eq!(core.save_context().sp, 0x1800);
+                let profile = core.cpu_profiling_snapshot().unwrap();
+                assert_eq!(profile.engine.cpu.mode, mode);
+                assert_eq!(profile.engine.cpu.seed, 59);
+                if mode == ProfileMode::Off {
+                    assert_eq!(profile.svc.calls, 0);
+                    assert_eq!(profile.svc.polls, 0);
+                    assert_eq!(profile.engine.wrapper.run_calls, 0);
+                    assert_eq!(profile.engine.cpu.instruction_attempts, 0);
+                } else {
+                    assert_eq!(profile.svc.calls, 1);
+                    assert_eq!(profile.svc.polls, 2);
+                    assert_eq!(profile.engine.wrapper.svc_exits, 1);
+                    assert_eq!(profile.engine.wrapper.function_returns, 1);
+                    assert_eq!(profile.engine.wrapper.run_calls, 2);
+                    assert_eq!(profile.engine.cpu.exception_entries, 1);
+                    assert!(profile.engine.cpu.instruction_attempts >= 5);
+                }
+                if mode == ProfileMode::Sampled {
+                    assert!(profile.svc.poll_inclusive_ns > 0);
+                    assert!(profile.engine.cpu.clock_reads > 0);
+                } else {
+                    assert_eq!(profile.svc.poll_inclusive_ns, 0);
+                    assert_eq!(profile.engine.cpu.clock_reads, 0);
+                    assert_eq!(profile.engine.wrapper.clock_reads, 0);
+                }
+                core.reset_cpu_profiling().unwrap();
+                let reset = core.cpu_profiling_snapshot().unwrap();
+                assert_eq!(reset.engine.cpu.mode, mode);
+                assert_eq!(reset.engine.cpu.seed, 59);
+                assert_eq!(reset.engine.cpu.instruction_attempts, 0);
+                assert_eq!(reset.engine.wrapper.run_calls, 0);
+                assert_eq!(reset.svc.calls, 0);
+                assert_eq!(reset.svc.polls, 0);
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn profile_api_rejects_debug_adapter_without_starting_a_server() {
+            let core = ArmCore::new(false, None).unwrap();
+            core.inner.lock().engine = Box::new(DebuggedArm32CpuEngine::new());
+            assert!(core.set_cpu_profiling(ProfileMode::Counts, 1, 1, panic_clock).is_err());
+            assert!(core.reset_cpu_profiling().is_err());
+            assert!(core.cpu_profiling_snapshot().is_err());
+        }
+    }
+
+    #[cfg(feature = "cpu-throughput")]
+    #[test]
+    fn throughput_api_counts_returning_function_and_reset_keeps_registers() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x1000, 0x1000).unwrap();
+        let mut context = core.save_context();
+        context.sp = 0x1800;
+        context.r4 = 0xfeed;
+        core.restore_context(&context);
+        core.inner.lock().engine.mem_write(0x1000, &[0x07, 0x20, 0x70, 0x47]).unwrap(); // MOV r0,7; BX lr
+        assert_eq!(core.cpu_throughput_snapshot().unwrap().total_instructions, 0);
+        let result: u32 = futures::executor::block_on(core.run_function(0x1001, &[])).unwrap();
+        assert_eq!(result, 7);
+        let snapshot = core.cpu_throughput_snapshot().unwrap();
+        assert_eq!(
+            (snapshot.arm_instructions, snapshot.thumb_instructions, snapshot.total_instructions),
+            (0, 2, 2)
+        );
+        assert_eq!(snapshot.full_profiling_compiled, cfg!(feature = "cpu-profiling"));
+        core.reset_cpu_throughput().unwrap();
+        assert_eq!(core.cpu_throughput_snapshot().unwrap().total_instructions, 0);
+        let after = core.save_context();
+        assert_eq!(
+            (after.sp, after.r4, after.pc, after.cpsr),
+            (context.sp, context.r4, context.pc, context.cpsr)
+        );
+    }
+
+    #[cfg(all(feature = "cpu-throughput", not(target_arch = "wasm32")))]
+    #[test]
+    fn throughput_api_rejects_debug_adapter_without_starting_server() {
+        let core = ArmCore::new(false, None).unwrap();
+        core.inner.lock().engine = Box::new(DebuggedArm32CpuEngine::new());
+        assert!(core.reset_cpu_throughput().is_err());
+        assert!(core.cpu_throughput_snapshot().is_err());
     }
 }

@@ -1,26 +1,32 @@
-# WIE
+# GOmul (고물)
 
-[Homepage](https://wie-site.dlunch.net) | [Try in browser](https://wie.dlunch.net)
+A Korean feature-phone emulator based on [WIE](https://github.com/dlunch/wie) by Inseok Lee (dlunch) and contributors. GOmul adds native Android launcher work, compatibility fixes, CPU experiments, and optional Mac-hosted Android checkpoint controls.
 
-A standalone web-based emulator for old mobile apps based on WIPI, SKVM or J2ME.
+**Early experimental release. Bring your own games.** No commercial games, game saves, authentication data bundles, or device snapshots are distributed here. The original MIT copyright and licence remain in [LICENSE](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md).
 
-This project is dedicated to digital preservation and educational research. Our goal is to revive the legacy of classic mobile games and allow them to be experienced in modern web environments.
+## What runs where
 
-- [Contribution guide](https://github.com/dlunch/wie/blob/main/CONTRIBUTING.md)
-- Architecture docs: [Emulator](docs/architecture.md) | [KTF](docs/ktf.md) | [LGT](docs/lgt.md)
+- **Native Android ARM64:** game library, JAR/ZIP import, rotation, virtual controls and silver phone-style UI. Compatibility varies by game; this is not a complete WIPI implementation.
+- **Android Virtual Device on macOS:** the same APK plus an optional local checkpoint helper. Quick Save/Load and protected startup states use whole-AVD snapshots; they are not portable save states and do not work on physical Android phones.
+- **Web / Tauri desktop:** experimental source frontends inherited from WIE and extended in this fork. They do not have the native Android checkpoint integration. Windows release binaries have not been validated locally.
 
-## Frontend
+[Build instructions](docs/build.md) · [Local Action Hero setup](docs/action-hero-setup.md) · [Compatibility](docs/compatibility.md) · [Release audit](docs/release-audit.md)
 
-The web and Android/iOS frontends are maintained in this repository under `wie-web` and `wie-app`.
+## Tested games
 
-```bash
-npm install
-npm run build:dev   # development web build
-npm run build:prod  # production web build
-npm start           # web development server
-```
+These observations come from private testing with user-supplied copies. Different carrier releases may behave differently.
 
-## Related projects
+| Game | Observed status |
+| --- | --- |
+| Reicarna / 레이카르나 | Playable; heavily exercised during optimization work. |
+| Mini Game Paradise 1 / 미니게임천국1 | Reported working in manual testing. |
+| Mini Game Paradise 2 / 미니게임천국2 | Reported working in manual testing. |
+| Super Action Hero 3 / 슈퍼액션히어로3 (LGT) | Main menu reached with matching emulated phone identity and user-supplied data. Full gameplay not certified. |
+| Gamevil 2010 Pro Baseball / 게임빌2010프로야구 | Fresh-save startup works; existing-save authentication problems remain. |
+| NOM 3 / 놈3 | Boots; reported display flickering still needs confirmation. |
 
-- [RustJava](https://github.com/dlunch/RustJava)
-- [smaf](https://github.com/dlunch/smaf)
+## Contributing
+
+Report carrier/version, platform, reproduction steps, and whether a fresh save changes the result. Do not attach commercial archives, snapshots, personal phone identities, or memory dumps to public issues. Synthetic reproductions and code fixes are welcome.
+
+General runtime fixes should be proposed upstream as focused changes with regression tests. GOmul-specific launcher and checkpoint work belongs in this fork. There is no affiliation with phone manufacturers, carriers, game publishers, or an endorsement by the WIE author.

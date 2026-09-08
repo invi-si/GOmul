@@ -56,6 +56,8 @@ pub struct KtfJvmThreadContext {
 struct KtfJvmSupportContext {
     ptr_vtables_base: u32,
     ptr_current_jvm_thread_context: u32,
+    image_base: u32,
+    image_size: u32,
 }
 
 const SUPPORT_CONTEXT_BASE: u32 = 0x7fff0000;
@@ -63,6 +65,11 @@ const SUPPORT_CONTEXT_BASE: u32 = 0x7fff0000;
 pub struct KtfJvmSupport;
 
 impl KtfJvmSupport {
+    pub fn set_native_image(core: &mut ArmCore, base: u32, size: u32) -> Result<()> {
+        write_generic(core, SUPPORT_CONTEXT_BASE + offset_of!(KtfJvmSupportContext, image_base) as u32, base)?;
+        write_generic(core, SUPPORT_CONTEXT_BASE + offset_of!(KtfJvmSupportContext, image_size) as u32, size)
+    }
+
     pub async fn init(core: &mut ArmCore, system: &mut System, jar_name: Option<&str>) -> Result<(Jvm, Box<dyn ClassInstance>)> {
         let jvm_context = InitParam2 {
             unk1: 0,
@@ -82,6 +89,20 @@ impl KtfJvmSupport {
         let protos = [wie_wipi_java::get_protos().into(), wie_midp::get_protos().into()];
         let jvm_implementation = KtfJvmImplementation::new(core);
         let jvm = JvmSupport::new_jvm(system, jar_name, Box::new(protos), &[], jvm_implementation.clone()).await?;
+        let root_core = core.clone();
+        jvm.set_native_root_provider(move || {
+            let snapshot = (|| -> Result<_> {
+                let context: KtfJvmSupportContext = read_generic(&root_core, SUPPORT_CONTEXT_BASE)?;
+                root_core.native_heap_reference_candidates(context.image_base, context.image_size)
+            })();
+            match snapshot {
+                Ok(roots) => Some(roots),
+                Err(error) => {
+                    tracing::error!("Cannot snapshot KTF native roots: {error}");
+                    None
+                }
+            }
+        });
         register_java_interface_svc_handler(core, &jvm)?;
 
         let system_class_loader: Box<dyn ClassInstance> = jvm
@@ -583,6 +604,49 @@ mod test {
             }
         }
 
+        Ok(())
+    }
+    #[test]
+    fn native_static_reference_survives_gc_and_is_reclaimed_after_clear() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let mut system_clone = system.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        system.spawn(async move || {
+            let (jvm, mut core) = init_jvm(&mut system_clone).await?;
+            core.map(0x100000, 0x1000)?;
+            KtfJvmSupport::set_native_image(&mut core, 0x100000, 0x1000)?;
+            let saved_context = core.save_context();
+            jvm.push_native_frame();
+            let string = JavaLangString::from_rust_string(&jvm, "native static root").await.unwrap();
+            let raw = KtfJvmSupport::class_instance_raw(&string.clone().into());
+            write_generic(&mut core, 0x100100, raw)?;
+            jvm.pop_frame();
+            core.restore_context(&saved_context);
+            jvm.collect_garbage().unwrap();
+            assert!(Allocator::is_allocated(&core, raw, 8)?);
+            jvm.push_native_frame();
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &string).await.unwrap(), "native static root");
+            jvm.pop_frame();
+            write_generic(&mut core, 0x100100, 0u32)?;
+            core.restore_context(&saved_context);
+            // Incomplete native memory snapshots must never cause live objects to be freed.
+            KtfJvmSupport::set_native_image(&mut core, 0x200000, 4)?;
+            assert_eq!(jvm.collect_garbage().unwrap(), 0);
+            assert!(Allocator::is_allocated(&core, raw, 8)?);
+            KtfJvmSupport::set_native_image(&mut core, 0x100000, 0x1000)?;
+            jvm.collect_garbage().unwrap();
+            assert!(!Allocator::is_allocated(&core, raw, 8)?);
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        for _ in 0..1000 {
+            system.tick()?;
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        assert!(done.load(Ordering::Relaxed));
         Ok(())
     }
 }

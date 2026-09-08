@@ -224,6 +224,12 @@ impl EventQueue {
             let maybe_event = context.system().event_queue().pop();
 
             if let Some(x) = maybe_event {
+                match &x {
+                    Event::Keydown(key) => tracing::info!(target: "wie_input", ?key, "guest_dequeue_down"),
+                    Event::Keyup(key) => tracing::info!(target: "wie_input", ?key, "guest_dequeue_up"),
+                    Event::Keyrepeat(key) => tracing::info!(target: "wie_input", ?key, "guest_dequeue_repeat"),
+                    _ => {}
+                }
                 let event_data = match x {
                     Event::Redraw => vec![EventQueueEvent::RepaintEvent as _, 0, 0, 0],
                     Event::Keydown(x) => vec![
@@ -249,7 +255,11 @@ impl EventQueue {
                         if due <= now {
                             callback()
                                 .or_else(async |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
-                                .await?
+                                .await?;
+                            // A callback can rearm a timer that is already due by
+                            // the time it finishes. Let the host process input and
+                            // presentation before consuming another callback.
+                            context.system().yield_now().await;
                         } else {
                             // push it to event queue again
                             pending_timer_events.push(Event::Timer { due, callback });
@@ -312,8 +322,13 @@ impl EventQueue {
 
         match event_kind {
             EventQueueEvent::RepaintEvent => {
+                // serviceRepaints may have already consumed the Java request
+                // before its frontend notification reaches this queue. Native
+                // Clets request redraw directly and still need their callback.
+                let native_paint: bool = jvm.get_field(&display, "paintDisabled", "Z").await?;
+                let method = if native_paint { "handlePaintEvent" } else { "serviceRepaints" };
                 let _: () = jvm
-                    .invoke_virtual(&display, "javax/microedition/lcdui/Display", "handlePaintEvent", "()V", ())
+                    .invoke_virtual(&display, "javax/microedition/lcdui/Display", method, "()V", ())
                     .await?;
             }
             EventQueueEvent::KeyEvent => {
@@ -323,6 +338,7 @@ impl EventQueue {
                     return Err(jvm.exception("java/lang/IllegalArgumentException", "Invalid keyboard event type").await);
                 };
                 let code = event[2];
+                tracing::info!(target: "wie_input", code, kind=event[1], "guest_key_callback_begin");
 
                 let _: () = jvm
                     .invoke_virtual(
@@ -333,6 +349,7 @@ impl EventQueue {
                         (event_type as i32, code),
                     )
                     .await?;
+                tracing::info!(target: "wie_input", code, kind=event[1], "guest_key_callback_end");
             }
             EventQueueEvent::NotifyEvent => {
                 let r#type = event[1];
@@ -393,14 +410,19 @@ impl EventQueue {
 
 #[cfg(test)]
 mod test {
-    use alloc::{boxed::Box, vec};
+    use alloc::{boxed::Box, sync::Arc, vec};
+    use core::{
+        future::Future,
+        sync::atomic::{AtomicU32, Ordering},
+        task::{Context, Waker},
+    };
 
     use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult};
     use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
     use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
 
     use test_utils::{TestPlatform, run_jvm_test_with_system};
-    use wie_backend::{Event, KeyCode};
+    use wie_backend::{Event, Instant, KeyCode, System};
     use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
     use wie_util::Result;
 
@@ -412,7 +434,51 @@ mod test {
         get_protos,
     };
 
-    use super::{EventQueue, EventQueueEvent};
+    use super::{EventQueue, EventQueueEvent, KeyboardEventType, MIDPKeyCode};
+
+    fn enqueue_recurring_due_timer(system: &System, callbacks: Arc<AtomicU32>) {
+        let system_clone = system.clone();
+        system.event_queue().push(Event::timer(Instant::from_epoch_millis(0), move || async move {
+            let count = callbacks.fetch_add(1, Ordering::Relaxed) + 1;
+            // Fail promptly if one poll drains the self-rearming queue forever.
+            assert!(count <= 2, "due timers starved the host between event-loop polls");
+            enqueue_recurring_due_timer(&system_clone, callbacks);
+            Ok(())
+        }));
+    }
+
+    #[test]
+    fn recurring_due_timer_yields_before_host_input() -> Result<()> {
+        run_jvm_test_with_system(Box::new([get_protos().into()]), Box::new(TestPlatform::new()), |jvm, system| async move {
+            let queue: ClassInstanceRef<EventQueue> = jvm
+                .invoke_static("net/wie/EventQueue", "getEventQueue", "()Lnet/wie/EventQueue;", ())
+                .await?;
+            let event: ClassInstanceRef<Array<i32>> = jvm.instantiate_array("I", 4).await?.into();
+            let callbacks = Arc::new(AtomicU32::new(0));
+            enqueue_recurring_due_timer(&system, callbacks.clone());
+
+            let mut next_event = Box::pin(jvm.invoke_virtual(&queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),)));
+            assert!(next_event.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+
+            // The host can supply input after the cooperative yield even though
+            // another timer is due and each callback queues its successor.
+            system.event_queue().push(Event::Keydown(KeyCode::NUM1));
+            let _: () = next_event.await?;
+            assert_eq!(
+                jvm.load_array::<i32>(&event, 0, 4).await?,
+                [
+                    EventQueueEvent::KeyEvent as i32,
+                    KeyboardEventType::KeyPressed as i32,
+                    MIDPKeyCode::KEY_NUM1 as i32,
+                    0
+                ]
+            );
+            assert_eq!(callbacks.load(Ordering::Relaxed), 2);
+            assert!(matches!(system.event_queue().pop(), Some(Event::Timer { .. })));
+            Ok(())
+        })
+    }
 
     struct RecurringCallback;
 
@@ -420,9 +486,11 @@ mod test {
         async fn paint(
             jvm: &Jvm,
             _context: &mut WieJvmContext,
-            _this: ClassInstanceRef<Self>,
+            mut this: ClassInstanceRef<Self>,
             graphics: ClassInstanceRef<Graphics>,
         ) -> JvmResult<()> {
+            let count: i32 = jvm.get_field(&this, "paints", "I").await?;
+            jvm.put_field(&mut this, "paints", "I", count + 1).await?;
             let _: () = jvm
                 .invoke_virtual(&graphics, "javax/microedition/lcdui/Graphics", "setColor", "(I)V", (0x22aa44,))
                 .await?;
@@ -474,7 +542,10 @@ mod test {
                     MethodAccessFlags::PROTECTED,
                 ),
             ],
-            fields: vec![JavaFieldProto::new("count", "I", FieldAccessFlags::PRIVATE)],
+            fields: vec![
+                JavaFieldProto::new("count", "I", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("paints", "I", FieldAccessFlags::PRIVATE),
+            ],
             access_flags: ClassAccessFlags::PUBLIC,
         };
         let midlet_proto = WieJavaClassProto {
@@ -530,6 +601,30 @@ mod test {
                     .await?;
                 assert_eq!(jvm.load_array::<i32>(&event, 0, 1).await?, [EventQueueEvent::KeyEvent as i32]);
                 assert_eq!(jvm.get_field::<i32>(&callback, "count", "I").await?, 1);
+                assert_eq!(jvm.get_field::<i32>(&callback, "paints", "I").await?, 1);
+                let mut redraw: ClassInstanceRef<Array<i32>> = jvm.instantiate_array("I", 4).await?.into();
+                jvm.store_array(&mut redraw, 0, vec![EventQueueEvent::RepaintEvent as i32, 0, 0, 0])
+                    .await?;
+                // The delayed notification must not paint an already serviced request.
+                let _: () = jvm
+                    .invoke_virtual(&queue, "net/wie/EventQueue", "dispatchEvent", "([I)V", (redraw.clone(),))
+                    .await?;
+                assert_eq!(jvm.get_field::<i32>(&callback, "paints", "I").await?, 1);
+                let _: () = jvm
+                    .invoke_virtual(&callback, "javax/microedition/lcdui/Canvas", "repaint", "()V", ())
+                    .await?;
+                let _: () = jvm
+                    .invoke_virtual(&queue, "net/wie/EventQueue", "dispatchEvent", "([I)V", (redraw.clone(),))
+                    .await?;
+                assert_eq!(jvm.get_field::<i32>(&callback, "paints", "I").await?, 2);
+                // Clet redraws originate outside Java's pending-request flag.
+                let _: () = jvm
+                    .invoke_virtual(&display, "javax/microedition/lcdui/Display", "disablePaint", "()V", ())
+                    .await?;
+                let _: () = jvm
+                    .invoke_virtual(&queue, "net/wie/EventQueue", "dispatchEvent", "([I)V", (redraw,))
+                    .await?;
+                assert_eq!(jvm.get_field::<i32>(&callback, "paints", "I").await?, 3);
                 Ok(())
             },
         )
