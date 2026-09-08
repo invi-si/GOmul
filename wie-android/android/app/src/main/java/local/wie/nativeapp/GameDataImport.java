@@ -81,6 +81,7 @@ final class GameDataImport {
     File record=new File(temp,plan.pid+"/db/"+entry.getKey()+"/1");if(!record.getParentFile().mkdirs())throw new IOException("Cannot create data record.");Files.write(record.toPath(),entry.getValue());
    }
    Files.write(new File(temp,"phone-number.txt").toPath(),(number+"\n").getBytes(StandardCharsets.UTF_8));
+   Files.write(new File(temp,"companion-imported").toPath(),new byte[]{1});
    File backup=null;
    if(save.exists()){backup=new File(parent,save.getName()+".before-data-"+UUID.randomUUID());Files.move(save.toPath(),backup.toPath(),StandardCopyOption.ATOMIC_MOVE);}
    try{Files.move(temp.toPath(),save.toPath(),StandardCopyOption.ATOMIC_MOVE);}

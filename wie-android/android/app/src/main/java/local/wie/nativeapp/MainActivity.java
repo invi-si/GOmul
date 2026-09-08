@@ -173,7 +173,22 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    if(lower.endsWith(".zip"))GameDataImport.normalize(temp);java.nio.file.Files.move(temp.toPath(),destination.toPath(),java.nio.file.StandardCopyOption.ATOMIC_MOVE);return destination;
   }finally{temp.delete();}
  }
- private void launch(File file){if(starting)return;starting=true;activeGame=file;showGame();status.setText("Loading…");audio.stopAll();io.execute(()->{try{
+ private void launch(File file){
+  if(starting)return;
+  File save=saveFolder(file);
+  if(new File(save,"companion-imported").isFile()){launchPrepared(file);return;}
+  starting=true;
+  io.execute(()->{try{
+   GameDataImport.Plan plan=GameDataImport.inspect(file,file);
+   if(plan!=null&&plan.phone==null){
+    File identity=new File(save,"phone-number.txt");
+    if(identity.isFile())plan=new GameDataImport.Plan(plan.pid,plan.files,new String(java.nio.file.Files.readAllBytes(identity.toPath()),java.nio.charset.StandardCharsets.UTF_8).trim());
+   }
+   GameDataImport.Plan pending=plan;
+   runOnUiThread(()->{starting=false;if(pending==null)launchPrepared(file);else finishDataImport(file,pending,save.exists());});
+  }catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
+ }
+ private void launchPrepared(File file){if(starting)return;starting=true;activeGame=file;showGame();status.setText("Loading…");audio.stopAll();io.execute(()->{try{
    java.nio.file.Files.write(new File(getFilesDir(),"active-game.txt").toPath(),file.getParentFile().getName().getBytes(java.nio.charset.StandardCharsets.UTF_8));
    if(new File(getFilesDir(),"mac-checkpoints.json").isFile()){
     String requestId=UUID.randomUUID().toString();
