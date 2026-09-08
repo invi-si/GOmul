@@ -6,7 +6,7 @@ A Korean feature-phone emulator based on [WIE](https://github.com/dlunch/wie) by
 
 ## What runs where
 
-- **Native Android ARM64:** game library, JAR/ZIP import, rotation, virtual controls and silver phone-style UI. Compatibility varies by game; this is not a complete WIPI implementation.
+- **Native Android ARM64:** game library, JAR/ZIP import, automatic companion-data setup, rotation, virtual controls and silver phone-style UI. Compatibility varies by game; this is not a complete WIPI implementation.
 - **Android Virtual Device on macOS:** the same APK plus an optional local checkpoint helper. Quick Save/Load and protected startup states use whole-AVD snapshots; they are not portable save states and do not work on physical Android phones.
 - **Web / Tauri desktop:** experimental source frontends inherited from WIE and extended in this fork. They do not have the native Android checkpoint integration. Windows release binaries have not been validated locally.
 

@@ -1,5 +1,17 @@
 # Super Action Hero 3: local setup
 
+## In the Android app (alpha.2 and later)
+
+Import your complete game ZIP with its companion data folder included. GOmul detects the LGT app identity and the savedata/locdata/ranker/it…/mk… files, installs them into that game’s private save storage, and launches it. A single enclosing package directory is accepted. Existing progress is retained when the same package is imported again.
+
+For separate data, hold the game in the library, choose **Import saved data**, then select its data ZIP or folder. Replacing existing progress requires confirmation and creates a local backup first.
+
+If the package includes a `gomul.properties` text file with `phoneNumber=` followed by its required 11-digit emulated identity, setup is automatic. Otherwise GOmul asks for that number once. Obtain it from the supplier of your data; the APK does not bundle or guess an identity. After setup, the game reads its imported save normally—this is not a Quick Load snapshot and works without a Mac helper. The game’s own startup/menu screens still run.
+
+No game/data download or patching is performed. You must supply the files. Tested privately through the Android file picker: all nine companion files were installed byte-for-byte and the game reached its main menu without the authentication error.
+
+## Optional protected startup on a Mac AVD
+
 This procedure is for the tested LGT package and the native APK on a Mac-hosted Android Virtual Device. It creates a checkpoint locally. Nothing is downloaded or bundled by the setup tool.
 
 1. Obtain your own complete game package, the accompanying data folder, and the emulated phone identity specified for that particular package. The outer ZIP must contain `app_info` and its application JAR at the root. Importing the JAR alone may lose its carrier/application identifiers.

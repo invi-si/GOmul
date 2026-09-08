@@ -23,6 +23,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  private final ExecutorService io=Executors.newSingleThreadExecutor();
  private final Set<String> held=new HashSet<>();
  private LinearLayout root;private TextView status;private GameView gameView;private AudioOutput audio;
+ private File dataImportGame;
  private File activeGame;private boolean foreground=false,starting=false;private final int[] pixels=new int[1024*1024];
  private long lastReport=0,lastPaints=0;
  @Override public void onCreate(Bundle state){super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);audio=new AudioOutput(getCacheDir());if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::handleBack);showLibrary();}
@@ -94,20 +95,82 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   TextView title=label("Your games",32);title.setTypeface(Typeface.DEFAULT,Typeface.BOLD);root.addView(title);
   TextView subtitle=label("A little screen. A whole world.",15);subtitle.setTextColor(0xff4d535b);root.addView(subtitle);
   addSpaced(root,button("＋  Import a game",()->{if(starting)return;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,1);}),54);
-  TextView hint=label("Choose a .jar or .zip from your phone",12);hint.setTextColor(0xff4d535b);root.addView(hint);
+  TextView hint=label("Import .jar / .zip · Hold a game to import saved data",12);hint.setTextColor(0xff4d535b);root.addView(hint);
   ScrollView scroll=new ScrollView(this);scroll.setClipToPadding(false);LinearLayout list=column();scroll.addView(list);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-  File[] folders=games().listFiles();if(folders!=null){Arrays.sort(folders);for(File folder:folders){File[] files=folder.listFiles((d,name)->name.toLowerCase(Locale.ROOT).endsWith(".jar")||name.toLowerCase(Locale.ROOT).endsWith(".zip"));if(files!=null)for(File game:files){Button item=button("▶   "+game.getName(),()->launch(game));item.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);item.setTextColor(0xff25292e);addSpaced(list,item,72);}}}
+  File[] folders=games().listFiles();if(folders!=null){Arrays.sort(folders);for(File folder:folders){File[] files=folder.listFiles((d,name)->name.toLowerCase(Locale.ROOT).endsWith(".jar")||name.toLowerCase(Locale.ROOT).endsWith(".zip"));if(files!=null)for(File game:files){Button item=button("▶   "+game.getName(),()->launch(game));item.setOnLongClickListener(v->{chooseData(game);return true;});item.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);item.setTextColor(0xff25292e);addSpaced(list,item,72);}}}
   if(list.getChildCount()==0){TextView empty=label("Your library is ready.\nImport your first game to start playing.",17);empty.setPadding(dp(8),dp(36),dp(8),dp(24));empty.setTextColor(0xff4d535b);list.addView(empty);}
   addSpaced(root,button("Open-source licences",()->{try(InputStream in=getAssets().open("LICENSES.txt")){new AlertDialog.Builder(this).setTitle("Licences").setMessage(new String(readBytes(in),java.nio.charset.StandardCharsets.UTF_8)).setPositiveButton("Close",null).show();}catch(IOException e){error(e);}}),48);
  }
- @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request!=1||result!=RESULT_OK||data==null)return;Uri uri=data.getData();if(uri==null)return;starting=true;Toast.makeText(this,"Importing game…",Toast.LENGTH_SHORT).show();io.execute(()->{try{File f=importGame(uri);runOnUiThread(()->{starting=false;showLibrary();launch(f);});}catch(Exception e){runOnUiThread(()->{starting=false;error(e);});}});}
+ private File saveFolder(File game){return new File(getFilesDir(),"saves/"+game.getParentFile().getName());}
+ private void chooseData(File game){
+  if(starting)return;dataImportGame=game;
+  new AlertDialog.Builder(this).setTitle("Import saved data").setItems(new String[]{"Choose data ZIP","Choose data folder"},(dialog,which)->{
+   Intent intent=new Intent(which==0?Intent.ACTION_OPEN_DOCUMENT:Intent.ACTION_OPEN_DOCUMENT_TREE);
+   if(which==0){intent.setType("*/*");intent.addCategory(Intent.CATEGORY_OPENABLE);}startActivityForResult(intent,which==0?2:3);
+  }).show();
+ }
+ private GameDataImport.Plan readDataFolder(File game,Uri tree)throws Exception {
+  String pid=GameDataImport.pid(game);if(pid==null)throw new IOException("Saved-data import currently requires a complete LGT ZIP with app_info.");
+  String document=android.provider.DocumentsContract.getTreeDocumentId(tree);
+  Uri children=android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(tree,document);
+  Map<String,byte[]> files=new LinkedHashMap<>();String phone=null;int total=0;
+  String[] columns={android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME};
+  try(Cursor cursor=getContentResolver().query(children,columns,null,null,null)){
+   if(cursor==null)throw new IOException("Cannot read the selected folder.");
+   while(cursor.moveToNext()){
+    String name=cursor.getString(1);if(!GameDataImport.dataName(name)&&!name.equals("gomul.properties"))continue;
+    Uri uri=android.provider.DocumentsContract.buildDocumentUriUsingTree(tree,cursor.getString(0));byte[] bytes;
+    try(InputStream in=getContentResolver().openInputStream(uri)){if(in==null)throw new IOException("Cannot read "+name);bytes=GameDataImport.read(in,GameDataImport.MAX_DATA);}
+    total+=bytes.length;if(total>GameDataImport.MAX_DATA)throw new IOException("Data bundle is too large.");
+    if(name.equals("gomul.properties")){Properties props=new Properties();props.load(new ByteArrayInputStream(bytes));phone=props.getProperty("phoneNumber");}
+    else {if(files.put(name,bytes)!=null)throw new IOException("Duplicate data filename.");}
+   }
+  }
+  if(files.isEmpty())throw new IOException("Choose the folder containing savedata and its companion files.");
+  return new GameDataImport.Plan(pid,files,phone);
+ }
+ private void finishDataImport(File game,GameDataImport.Plan plan,boolean replace){
+  if(plan.phone!=null){installData(game,plan,plan.phone,replace);return;}
+  EditText number=new EditText(this);number.setInputType(android.text.InputType.TYPE_CLASS_PHONE);number.setHint("11-digit emulated phone number");
+  new AlertDialog.Builder(this).setTitle("Saved data detected").setMessage("Enter the phone number specified by the supplier of these files. This only sets the game's emulated identity.").setView(number)
+   .setPositiveButton("Import and play",(dialog,which)->installData(game,plan,number.getText().toString(),replace)).setNegativeButton("Cancel",null).show();
+ }
+ private void installData(File game,GameDataImport.Plan plan,String phone,boolean replace){
+  starting=true;io.execute(()->{try{GameDataImport.install(saveFolder(game),plan,phone,replace);runOnUiThread(()->{starting=false;Toast.makeText(this,"Saved data imported",Toast.LENGTH_SHORT).show();launch(game);});}
+   catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
+ }
+ private void offerDataImport(File game,GameDataImport.Plan plan,boolean separate){
+  if(plan==null){if(separate)error(new IOException("No companion saved-data files were found."));else launch(game);return;}
+  if(saveFolder(game).exists()){
+   if(!separate){launch(game);return;}
+   new AlertDialog.Builder(this).setTitle("Replace this game's saved data?").setMessage("The current save will be backed up before importing these files. Other games are unaffected.")
+    .setPositiveButton("Back up and import",(dialog,which)->finishDataImport(game,plan,true)).setNegativeButton("Cancel",null).show();return;
+  }
+  finishDataImport(game,plan,false);
+ }
+ @Override protected void onActivityResult(int request,int result,Intent data){
+  super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null||request<1||request>3)return;Uri uri=data.getData();if(uri==null)return;
+  File selected=dataImportGame;starting=true;Toast.makeText(this,"Reading imported files…",Toast.LENGTH_SHORT).show();
+  io.execute(()->{try{
+   File game;GameDataImport.Plan plan;
+   if(request==1){game=importGame(uri);plan=GameDataImport.inspect(game,game);}
+   else {if(selected==null)throw new IOException("Select a game again before importing data.");game=selected;
+    if(request==3)plan=readDataFolder(game,uri);
+    else {File temporary=File.createTempFile("data-import-",".zip",getCacheDir());try{
+     try(InputStream in=getContentResolver().openInputStream(uri)){if(in==null)throw new IOException("Cannot open data ZIP.");java.nio.file.Files.write(temporary.toPath(),GameDataImport.read(in,GameDataImport.MAX_DATA));}
+     plan=GameDataImport.inspect(game,temporary);
+    }finally{temporary.delete();}}
+   }
+   File ready=game;GameDataImport.Plan pending=plan;runOnUiThread(()->{starting=false;showLibrary();offerDataImport(ready,pending,request!=1);});
+  }catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
+ }
  private File importGame(Uri uri)throws Exception {
   String name="game.jar";try(Cursor c=getContentResolver().query(uri,new String[]{OpenableColumns.DISPLAY_NAME},null,null,null)){if(c!=null&&c.moveToFirst())name=c.getString(0);}
   name=new File(name).getName().replaceAll("[^\\p{L}\\p{N}._ -]","_");String lower=name.toLowerCase(Locale.ROOT);if(!lower.endsWith(".jar")&&!lower.endsWith(".zip"))throw new IOException("Choose a .jar or .zip game archive.");
   File temp=File.createTempFile("import-",".tmp",getCacheDir());MessageDigest hash=MessageDigest.getInstance("SHA-256");
   try {try(InputStream in=getContentResolver().openInputStream(uri);OutputStream out=new FileOutputStream(temp)){if(in==null)throw new IOException("Cannot open game file");byte[] b=new byte[65536];long total=0;int n;while((n=in.read(b))!=-1){total+=n;if(total>128L*1024*1024)throw new IOException("This prototype accepts archives up to 128 MB.");hash.update(b,0,n);out.write(b,0,n);}}
    StringBuilder id=new StringBuilder();for(byte b:hash.digest())id.append(String.format(Locale.ROOT,"%02x",b));File folder=new File(games(),id.toString());if(!folder.exists()&&!folder.mkdirs())throw new IOException("Cannot create game directory");File destination=new File(folder,name);if(destination.exists())return destination;
-   java.nio.file.Files.move(temp.toPath(),destination.toPath(),java.nio.file.StandardCopyOption.ATOMIC_MOVE);return destination;
+   if(lower.endsWith(".zip"))GameDataImport.normalize(temp);java.nio.file.Files.move(temp.toPath(),destination.toPath(),java.nio.file.StandardCopyOption.ATOMIC_MOVE);return destination;
   }finally{temp.delete();}
  }
  private void launch(File file){if(starting)return;starting=true;activeGame=file;showGame();status.setText("Loading…");audio.stopAll();io.execute(()->{try{
