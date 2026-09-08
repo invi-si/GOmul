@@ -13,3 +13,7 @@ Vendored modified dependencies retain their notices:
 Additional npm/Rust notices are in wie-web/public/licenses/. The native Android build generates its dependency notices into the APK's Licences page. Those dependency licences are not replaced by GOmul's MIT licence.
 
 The two upstream Hello World ZIP fixtures and arm32_cpu synthetic instruction binaries are software test fixtures, not commercial games or game saves. They are retained for correctness testing. The Gradle wrapper JAR is build tooling. No Action Hero data or full-device checkpoint is included.
+
+GOmul additions retain MIT licensing. The GOmul contribution notice and
+[provenance identifiers](PROVENANCE.json) do not assert ownership of WIE or other
+third-party contributions. See [provenance guidance](docs/provenance.md).

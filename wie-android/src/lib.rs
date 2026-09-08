@@ -1,5 +1,12 @@
+// GOmul provenance: gomul-component:5b3221ec-dfc4-4817-9693-367ec65b6180 (android-launcher); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 //! Native Android adapter. Guest CPU, memory and WIPI services live on one Rust
 //! worker; JNI carries input, complete frames and audio commands only.
+
+// Public, inert binary-origin marker; no execution, guest state, or network access.
+#[unsafe(no_mangle)]
+pub static GOMUL_ORIGIN_ID: [u8; 42] = *b"gomul:004bbd10-6346-4879-b26a-f1cf14832c19";
+
 mod audio;
 mod checkpoint;
 #[cfg(all(feature = "input-trace", target_os = "android"))]

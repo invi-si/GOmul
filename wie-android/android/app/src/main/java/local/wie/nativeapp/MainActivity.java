@@ -1,3 +1,5 @@
+// GOmul provenance: gomul-component:5b3221ec-dfc4-4817-9693-367ec65b6180 (android-launcher); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 package local.wie.nativeapp;
 
 import android.app.*;

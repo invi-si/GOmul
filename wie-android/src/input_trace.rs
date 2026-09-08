@@ -1,3 +1,5 @@
+// GOmul provenance: gomul-component:afb25abf-cc6c-4ab9-b0b9-3a5a3435e6bb (input-diagnostics); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 //! Bounded opt-in diagnostic buffer; no formatting or file writes while recording.
 use std::{
     path::Path,

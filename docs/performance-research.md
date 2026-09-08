@@ -1,3 +1,5 @@
+<!-- GOmul provenance: gomul-component:a74a4c0c-0a34-43f2-987b-8342f693a669 (research); see PROVENANCE.json. -->
+
 # Performance research and timer correctness
 
 This page summarizes the investigation after GOmul 0.1.0. Detailed reports below

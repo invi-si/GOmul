@@ -1,3 +1,5 @@
+// GOmul provenance: gomul-component:afeddc1a-2596-432a-be9b-d1fdad7d7751 (cpu-attribution); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 //! Untimed, thread-local observations. No architectural state is stored here.
 //! Enabled only around replay CPU runs, never around restore/validation.
 use std::{cell::RefCell, collections::BTreeMap};

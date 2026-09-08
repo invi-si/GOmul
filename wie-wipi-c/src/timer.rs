@@ -1,3 +1,5 @@
+// GOmul provenance: gomul-component:547fda0f-26ca-42b7-a949-f73b0c7a029c (timer-cancellation); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 //! Pending WIPI timer registrations. All links and cancellation flags are guest-backed.
 //! The System adapter holds only the head address, never an authoritative host registry.
 use crate::WIPICContext;

@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "project": "GOmul",
+  "project_id": "gomul:004bbd10-6346-4879-b26a-f1cf14832c19",
+  "repository": "https://github.com/invi-si/GOmul",
+  "upstream": "https://github.com/dlunch/wie",
+  "license": "MIT",
+  "scope": "Identifiers describe GOmul provenance, not exclusive ownership of upstream or third-party work.",
+  "components": [
+    {
+      "name": "timer-cancellation",
+      "id": "gomul-component:547fda0f-26ca-42b7-a949-f73b0c7a029c",
+      "files": [
+        "wie-wipi-c/src/timer.rs"
+      ]
+    },
+    {
+      "name": "callback-transcripts",
+      "id": "gomul-component:0a6da7f9-6ed1-442f-9005-976c83c6b108",
+      "files": [
+        "wie-core-arm/src/engine/cpu_transcript.rs"
+      ]
+    },
+    {
+      "name": "cpu-attribution",
+      "id": "gomul-component:afeddc1a-2596-432a-be9b-d1fdad7d7751",
+      "files": [
+        "vendor/arm32_cpu/src/exact_counts.rs"
+      ]
+    },
+    {
+      "name": "input-diagnostics",
+      "id": "gomul-component:afb25abf-cc6c-4ab9-b0b9-3a5a3435e6bb",
+      "files": [
+        "wie-util/src/input_trace.rs",
+        "wie-android/src/input_trace.rs",
+        "wie-android/src/trace_aggregate.rs"
+      ]
+    },
+    {
+      "name": "android-launcher",
+      "id": "gomul-component:5b3221ec-dfc4-4817-9693-367ec65b6180",
+      "files": [
+        "wie-android/src/lib.rs",
+        "wie-android/android/app/src/main/java/local/wie/nativeapp/MainActivity.java"
+      ]
+    },
+    {
+      "name": "research",
+      "id": "gomul-component:a74a4c0c-0a34-43f2-987b-8342f693a669",
+      "files": [
+        "docs/performance-research.md"
+      ]
+    }
+  ]
+}

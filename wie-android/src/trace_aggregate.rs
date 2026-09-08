@@ -1,3 +1,5 @@
+// GOmul provenance: gomul-component:afb25abf-cc6c-4ab9-b0b9-3a5a3435e6bb (input-diagnostics); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 //! Allocation-free aggregation of active CPU/host polls within executor task polls.
 //! Short tasks still contribute to tick totals. Detailed task intervals >=250 us survive.
 #[derive(Clone, Copy, Default)]

@@ -1,3 +1,5 @@
+// GOmul provenance: gomul-component:0a6da7f9-6ed1-442f-9005-976c83c6b108 (callback-transcripts); see PROVENANCE.json.
+// GOmul contributions: Copyright (c) 2026 invi-si. SPDX-License-Identifier: MIT
 //! CPU-only transcript of one timer callback. Environmental transitions include
 //! host calls AND other tasks that ran while the callback was suspended.
 //! Capture/verification write tracking is absent from ordinary replay builds.

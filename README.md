@@ -29,6 +29,8 @@ These observations come from private testing with user-supplied copies. Differen
 | Gamevil 2010 Pro Baseball / 게임빌2010프로야구 | Fresh-save startup works; existing-save authentication problems remain. |
 | NOM 3 / 놈3 | Boots; reported display flickering still needs confirmation. |
 
+[Provenance and attribution](docs/provenance.md) documents offline source/build identifiers and how to interpret matches responsibly.
+
 ## Contributing
 
 Report carrier/version, platform, reproduction steps, and whether a fresh save changes the result. Do not attach commercial archives, snapshots, personal phone identities, or memory dumps to public issues. Synthetic reproductions and code fixes are welcome.
