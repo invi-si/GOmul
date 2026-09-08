@@ -7,6 +7,7 @@ description.workspace = true
 repository.workspace = true
 
 [features]
+cpu-transcript-capture = ["wie-core-arm/cpu-transcript-capture", "wie-wipi-c/cpu-transcript-capture"]
 experimental-thumb-inline = ["wie-core-arm/experimental-thumb-inline"]
 experimental-thumb-blocks = ["wie-core-arm/experimental-thumb-blocks"]
 experimental-pc-local = ["wie-core-arm/experimental-pc-local"]

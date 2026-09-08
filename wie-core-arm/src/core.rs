@@ -376,6 +376,15 @@ impl ArmCore {
         }
     }
 
+    #[cfg(feature = "cpu-transcript-capture")]
+    pub fn transcript_begin(&mut self, callback: u64) {
+        crate::cpu_replay::transcript::begin(self.inner.lock().engine.as_mut(), callback);
+    }
+    #[cfg(feature = "cpu-transcript-capture")]
+    pub fn transcript_end(&mut self, callback: u64, ok: bool) {
+        crate::cpu_replay::transcript::end(self.inner.lock().engine.as_mut(), callback, ok);
+    }
+
     pub async fn run_function<R>(&mut self, address: u32, params: &[u32]) -> Result<R>
     where
         R: RunFunctionResult<R>,
@@ -431,6 +440,16 @@ impl ArmCore {
 
             self.sample_profile();
 
+            wie_util::input_trace::event(
+                wie_util::input_trace::EXIT,
+                b'I',
+                0,
+                match &result {
+                    EngineRunResult::End => 0,
+                    EngineRunResult::CountExhausted => 1,
+                    EngineRunResult::Svc { category, .. } => 0x100000000 | u64::from(*category),
+                },
+            );
             match result {
                 EngineRunResult::End => break,
                 EngineRunResult::CountExhausted => YieldFuture::new().await, // yield to allow other tasks to run
@@ -453,7 +472,16 @@ impl ArmCore {
 
                     let mut self1 = self.clone();
                     #[cfg(not(feature = "cpu-profiling"))]
-                    function.call(&mut self1).await?;
+                    {
+                        let mut future = core::pin::pin!(function.call(&mut self1));
+                        core::future::poll_fn(|cx| {
+                            let mut trace = wie_util::input_trace::span(wie_util::input_trace::HOST_POLL, u64::from(category));
+                            let result = future.as_mut().poll(cx);
+                            trace.result = u64::from(result.is_ready());
+                            result
+                        })
+                        .await?;
+                    }
                     #[cfg(feature = "cpu-profiling")]
                     {
                         let profile_core = self.clone();

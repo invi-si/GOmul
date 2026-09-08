@@ -13,6 +13,7 @@ keywords = ["emulator", "emulation", "arm", "armv4t", "armv5"]
 categories = ["emulators"]
 
 [features]
+exact-counts = ["serde-serialize"]
 default = []
 serde-serialize = ["serde", "serde-big-array"]
 advanced_disasm = ["capstone"]

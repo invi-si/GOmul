@@ -68,7 +68,52 @@ impl KeyCode {
 
 #[cfg(test)]
 mod tests {
-    use super::KeyCode;
+    use super::{Event, EventQueue, KeyCode};
+
+    #[test]
+    fn event_queue_preserves_order_and_empty_transitions() {
+        for mut queue in [EventQueue::new(), EventQueue::default()] {
+            assert!(queue.pop().is_none());
+            queue.push(Event::Redraw);
+            queue.push(Event::Keydown(KeyCode::LEFT));
+            queue.push(Event::Keyup(KeyCode::LEFT));
+            assert!(matches!(queue.pop(), Some(Event::Redraw)));
+            assert!(matches!(queue.pop(), Some(Event::Keydown(KeyCode::LEFT))));
+            assert!(matches!(queue.pop(), Some(Event::Keyup(KeyCode::LEFT))));
+            assert!(queue.pop().is_none());
+            queue.push(Event::Keyrepeat(KeyCode::RIGHT));
+            assert!(matches!(queue.pop(), Some(Event::Keyrepeat(KeyCode::RIGHT))));
+            #[cfg(feature = "input-trace")]
+            assert!(queue.trace_ids.is_empty());
+        }
+    }
+
+    #[cfg(feature = "input-trace")]
+    #[test]
+    fn diagnostic_ids_preserve_timer_identity_and_repeat_order() {
+        let mut q = EventQueue::new();
+        let registration = wie_util::input_trace::TimerRegistration::new(0x1000, 0x2001, 3, 100, 100, 0);
+        {
+            let _scope = registration.enqueue_scope();
+            q.push(Event::timer(crate::Instant::from_epoch_millis(100), || async { Ok(()) }));
+        }
+        q.push(Event::Keyrepeat(KeyCode::LEFT));
+        q.push(Event::Keyrepeat(KeyCode::LEFT));
+        let (timer, timer_id) = q.pop_traced();
+        q.push_traced(timer.unwrap(), timer_id);
+        let (r1, id1) = q.pop_traced();
+        let (r2, id2) = q.pop_traced();
+        assert!(matches!(r1, Some(Event::Keyrepeat(KeyCode::LEFT))));
+        assert!(matches!(r2, Some(Event::Keyrepeat(KeyCode::LEFT))));
+        assert_ne!(id1, id2);
+        assert_ne!(id1, timer_id);
+        let (timer, id) = q.pop_traced();
+        assert_eq!(id, timer_id);
+        assert_eq!(id.registration, registration.id());
+        assert!(matches!(timer,Some(Event::Timer{due,..}) if due==crate::Instant::from_epoch_millis(100)));
+        assert!(q.pop().is_none());
+        assert!(q.trace_ids.is_empty());
+    }
 
     #[test]
     fn parse_phone_function_keys() {
@@ -79,7 +124,7 @@ mod tests {
     }
 }
 
-type TimerCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+type TimerCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<bool>> + Send>> + Send + Sync>;
 
 pub enum Event {
     Redraw,
@@ -96,6 +141,18 @@ impl Event {
         F: FnOnce() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
+        Self::timer_checked(due, move || async move {
+            callback().await?;
+            Ok(true)
+        })
+    }
+
+    /// False means cancellation prevented guest callback entry; do not yield as if it ran.
+    pub fn timer_checked<F, Fut>(due: Instant, callback: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bool>> + Send + 'static,
+    {
         Event::Timer {
             due,
             callback: Box::new(move || Box::pin(callback())),
@@ -103,21 +160,121 @@ impl Event {
     }
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct TraceEventId {
+    #[cfg(feature = "input-trace")]
+    id: u64,
+    #[cfg(feature = "input-trace")]
+    registration: u64,
+}
+impl TraceEventId {
+    pub fn raw(self) -> u64 {
+        #[cfg(feature = "input-trace")]
+        {
+            self.id
+        }
+        #[cfg(not(feature = "input-trace"))]
+        {
+            0
+        }
+    }
+}
 #[derive(Default)]
 pub struct EventQueue {
     events: VecDeque<Event>,
+    #[cfg(feature = "input-trace")]
+    trace_ids: VecDeque<(TraceEventId, u64)>,
 }
 
 impl EventQueue {
     pub fn new() -> Self {
-        Self { events: VecDeque::new() }
+        Self {
+            events: VecDeque::new(),
+            #[cfg(feature = "input-trace")]
+            trace_ids: VecDeque::new(),
+        }
     }
 
     pub fn push(&mut self, event: Event) {
-        self.events.push_back(event);
+        self.push_traced(event, TraceEventId::default());
     }
 
+    /// The identity is diagnostic only; timers retain it when deferred/reinserted.
+    pub fn push_traced(&mut self, event: Event, previous_id: TraceEventId) {
+        #[cfg(feature = "input-trace")]
+        {
+            use wie_util::input_trace as trace;
+            let input = trace::input_id();
+            let metadata = if previous_id.raw() == 0 {
+                TraceEventId {
+                    id: trace::next_id(),
+                    registration: trace::TimerRegistration::current_enqueue(),
+                }
+            } else {
+                previous_id
+            };
+            let id = metadata.raw();
+            self.trace_ids.push_back((metadata, input));
+            if metadata.registration != 0 {
+                trace::event(110, b'I', id, metadata.registration);
+            }
+            trace::event(60, b'I', id, event.trace_kind());
+            trace::event(61, b'I', id, input);
+            trace::event(62, b'I', id, self.events.len() as u64);
+            if let Event::Timer { due, .. } = &event {
+                trace::event(65, b'I', id, due.raw());
+            }
+            if input != 0 {
+                trace::event(trace::QUEUE_PUSH, b'I', input, self.events.len() as u64);
+            }
+        }
+        #[cfg(not(feature = "input-trace"))]
+        let _ = previous_id;
+        self.events.push_back(event);
+    }
     pub fn pop(&mut self) -> Option<Event> {
-        self.events.pop_front()
+        self.pop_traced().0
+    }
+    pub fn pop_traced(&mut self) -> (Option<Event>, TraceEventId) {
+        let event = self.events.pop_front();
+        #[cfg(feature = "input-trace")]
+        let mut trace_id = TraceEventId::default();
+        #[cfg(not(feature = "input-trace"))]
+        let trace_id = TraceEventId::default();
+        #[cfg(feature = "input-trace")]
+        if let Some(ref event) = event {
+            use wie_util::input_trace as trace;
+            let (metadata, input) = self.trace_ids.pop_front().expect("diagnostic queue metadata aligned");
+            let id = metadata.raw();
+            trace_id = metadata;
+            if metadata.registration != 0 {
+                trace::event(110, b'I', id, metadata.registration);
+            }
+            trace::event(63, b'I', id, event.trace_kind());
+            trace::event(64, b'I', id, self.events.len() as u64);
+            if input != 0 {
+                trace::event(trace::GUEST_POP, b'I', input, self.events.len() as u64);
+            }
+            if trace::enabled() {
+                for (rank, (event_id, input_id)) in self.trace_ids.iter().enumerate() {
+                    if *input_id != 0 {
+                        trace::event(90, b'I', event_id.raw(), rank as u64 + 1);
+                    }
+                }
+            }
+        }
+        (event, trace_id)
+    }
+}
+impl Event {
+    pub fn trace_kind(&self) -> u64 {
+        match self {
+            Self::Redraw => 1,
+            Self::Keydown(_) => 2,
+            Self::Keyup(_) => 3,
+            Self::Keyrepeat(_) => 4,
+            Self::Timer { .. } => 5,
+            Self::Notify { .. } => 6,
+        }
     }
 }

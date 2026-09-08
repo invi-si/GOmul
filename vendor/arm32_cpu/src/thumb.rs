@@ -149,8 +149,12 @@ impl Cpu {
         #[cfg(feature = "profiling")]
         self.profiling.instruction_set(true);
         let pc = self.reg[reg::PC];
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::fetch(true);
         let inst = profile_span!(self, Fetch, mmu.r16(pc)) as u32;
         let inst_type = profile_span!(self, Decode, self::Instruction::decode(inst as u16));
+        #[cfg(feature = "exact-counts")]
+        { crate::exact_counts::fetch(false); crate::exact_counts::instruction(pc, inst, true, inst_type as u32, inst_type); }
         #[cfg(feature = "profiling")]
         self.profiling.decoded(inst_type != Instruction::Undefined);
         let cpsr = profile_span!(self, FlagsCpsr, self.reg[reg::CPSR]);
@@ -330,6 +334,8 @@ impl Cpu {
                         let new_t = vals.get_bit( 0);
                         let mask: u32 = if new_t == 0 { !3 } else { !1 };
 
+                        #[cfg(feature = "exact-counts")]
+                        crate::exact_counts::branch(false, true);
                         profile_reg_write!(self, reg::PC, self.reg[reg::PC] = vals & mask);
 
                         let cpsr_mask = 1 << cpsr::T;
@@ -612,7 +618,10 @@ impl Cpu {
                 let cond = inst.extract(8, 4);
                 let offset = inst.extract(0, 8) as i8 as u32;
 
-                if profile_span!(self, Condition, cond_met(cond, cpsr)) {
+                let taken = profile_span!(self, Condition, cond_met(cond, cpsr));
+                #[cfg(feature = "exact-counts")]
+                crate::exact_counts::branch(true, taken);
+                if taken {
                     profile_reg_write!(
                         self,
                         reg::PC,
@@ -624,6 +633,8 @@ impl Cpu {
                 profile_span!(self, Exception, self.exception(Exception::Software));
             }
             Branch => {
+                #[cfg(feature = "exact-counts")]
+                crate::exact_counts::branch(false, true);
                 let offset = (inst.extract(0, 11) << 1).sign_extend(12);
 
                 profile_reg_write!(
@@ -633,13 +644,19 @@ impl Cpu {
                 );
             }
             LongBranch => {
+                #[cfg(feature = "exact-counts")]
+                crate::exact_counts::fetch(true);
                 let inst2 = profile_span!(self, Fetch, mmu.r16(pc.wrapping_add(2))) as u32;
+                #[cfg(feature = "exact-counts")]
+                crate::exact_counts::fetch(false);
                 let offset_hi = inst.extract(0, 11);
                 let offset_lo = inst2.extract(0, 11);
                 let lr = pc
                     .wrapping_add(4)
                     .wrapping_add((offset_hi << 12).sign_extend(23));
 
+                #[cfg(feature = "exact-counts")]
+                crate::exact_counts::branch(false, inst2.mask_match(0xf800, 0xf800) || inst2.mask_match(0xf801, 0xe800));
                 if inst2.mask_match(0xf800, 0xf800) {
                     profile_reg_write!(
                         self,

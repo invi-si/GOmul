@@ -1,5 +1,6 @@
 #![no_std]
 extern crate alloc;
+pub mod input_trace;
 
 use alloc::{format, string::String, vec::Vec};
 use core::{

@@ -40,6 +40,8 @@ use capstone::prelude::*;
 
 #[cfg(feature = "profiling")]
 pub mod profiling;
+#[cfg(feature = "exact-counts")]
+pub mod exact_counts;
 
 // The disabled definitions erase observations before type checking/codegen.
 #[cfg(feature = "profiling")]

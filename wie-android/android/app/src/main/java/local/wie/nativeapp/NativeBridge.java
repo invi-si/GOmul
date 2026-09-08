@@ -5,8 +5,10 @@ final class NativeBridge {
  static native void stop();
  static native String checkpoint(String action);
  static native void pause(boolean paused);
- static native void key(String key,boolean down);
- static native long frame(int[] pixels);
+ static native void key(String key,boolean down,long id,long eventNs,long listenerNs);
+ static native long frame(int[] pixels,long[] metadata);
+ static native void tracePoint(int kind,long id,long value);
+ static native void traceControl(boolean active,String path);
  static native String status();
  static native long paints();
  static native byte[] audio();

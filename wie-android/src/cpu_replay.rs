@@ -21,6 +21,8 @@ impl Controller {
         }
     }
     pub fn poll(&mut self) {
+        #[cfg(feature = "cpu-transcript-capture")]
+        self.poll_transcript();
         if let Some(capture) = cpu_replay::take_capture() {
             let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
             let path = self.directory.join(format!("cpu-replay-{stamp}.json"));
@@ -59,10 +61,56 @@ impl Controller {
             self.remaining -= 1;
         }
     }
+    #[cfg(feature = "cpu-transcript-capture")]
+    fn poll_transcript(&mut self) {
+        use wie_core_arm::cpu_replay::transcript;
+        if let Some(result) = transcript::take_capture() {
+            let message = match result {
+                Ok(capture) => {
+                    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+                    let path = self.directory.join(format!("cpu-transcript-{stamp}.json"));
+                    let saved = (|| -> anyhow::Result<()> {
+                        let file = fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+                        let mut writer = std::io::BufWriter::new(file);
+                        serde_json::to_writer(&mut writer, &capture)?;
+                        std::io::Write::flush(&mut writer)?;
+                        Ok(())
+                    })();
+                    match saved {
+                        Ok(()) => format!(
+                            "Saved {}: callback={} segments={} steps={} svc={} delta_bytes={} returned_ok={}\n",
+                            path.display(),
+                            capture.callback,
+                            capture.segments(),
+                            capture.steps(),
+                            capture.svc_exits(),
+                            capture.delta_bytes(),
+                            capture.returned_ok
+                        ),
+                        Err(error) => format!("Transcript write failed: {error}\n"),
+                    }
+                }
+                Err(error) => format!("Transcript capture failed: {error}\n"),
+            };
+            let _ = fs::write(self.directory.join("cpu-transcript-status.txt"), message);
+        }
+        if self.checked.elapsed() >= Duration::from_secs(1) {
+            let trigger = self.directory.join("cpu-transcript.request");
+            if trigger.exists() && transcript::request_capture() {
+                if fs::remove_file(trigger).is_err() {
+                    transcript::cancel_pending();
+                } else {
+                    let _ = fs::write(self.directory.join("cpu-transcript-status.txt"), "Armed for next WIPI timer callback\n");
+                }
+            }
+        }
+    }
 }
 impl Drop for Controller {
     fn drop(&mut self) {
         cpu_replay::cancel_capture();
+        #[cfg(feature = "cpu-transcript-capture")]
+        wie_core_arm::cpu_replay::transcript::cancel_capture();
     }
 }
 

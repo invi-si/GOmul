@@ -9,6 +9,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
+cpu-transcript-capture = ["cpu-replay", "wie-core-arm/cpu-transcript-capture", "wie-ktf/cpu-transcript-capture", "wie-lgt/cpu-transcript-capture"]
+input-trace = ["wie-util/input-trace", "wie-backend/input-trace", "dep:libc", "dep:serde_json"]
 frame-diagnostics = ["dep:tracing-subscriber", "tracing/std"]
 cpu-replay = ["dep:wie-core-arm", "wie-core-arm/cpu-replay", "dep:serde_json"]
 experimental-thumb-inline = ["wie-lgt/experimental-thumb-inline"]
@@ -18,6 +20,7 @@ native-cpu-bench = ["dep:wie-cpu-bench"]
 [dependencies]
 anyhow.workspace = true
 sha2 = "0.10"
+libc = { version = "0.2", optional = true }
 async-trait.workspace = true
 tracing.workspace = true
 log = { version = "0.4", features = ["release_max_level_warn"] }

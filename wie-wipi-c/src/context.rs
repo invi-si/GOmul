@@ -12,6 +12,10 @@ use crate::{
 
 #[async_trait::async_trait]
 pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
+    #[cfg(feature = "cpu-transcript-capture")]
+    fn transcript_begin(&mut self, _callback: u64) {}
+    #[cfg(feature = "cpu-transcript-capture")]
+    fn transcript_end(&mut self, _callback: u64, _ok: bool) {}
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord>;
     fn alloc(&mut self, size: WIPICWord) -> Result<WIPICIndirectPtr>;
     fn free(&mut self, memory: WIPICIndirectPtr) -> Result<()>;
@@ -22,7 +26,7 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     fn spawn(&mut self, callback: WIPICMethodBody) -> Result<()>;
     async fn get_resource_size(&self, name: &str) -> Result<Option<usize>>;
     async fn read_resource(&self, name: &str) -> Result<Vec<u8>>;
-    fn set_timer(&mut self, due: Instant, callback: WIPICMethodBody);
+    fn set_timer(&mut self, due: Instant, registration: WIPICWord, callback: WIPICMethodBody);
 }
 
 pub struct WIPICResult {
@@ -100,6 +104,8 @@ pub mod test {
         last_alloc: usize,
         system: Option<System>,
         resources: Vec<(String, Vec<u8>)>,
+        pub timers: alloc::collections::VecDeque<(Instant, u32, WIPICMethodBody)>,
+        pub calls: Vec<(u32, Vec<u32>)>,
     }
 
     impl TestContext {
@@ -112,6 +118,8 @@ pub mod test {
                 last_alloc: TEST_ALLOC_START,
                 system: None,
                 resources: Vec::new(),
+                timers: alloc::collections::VecDeque::new(),
+                calls: Vec::new(),
             }
         }
 
@@ -162,8 +170,9 @@ pub mod test {
             Ok(memory.0)
         }
 
-        async fn call_function(&mut self, _address: WIPICWord, _args: &[WIPICWord]) -> Result<WIPICWord> {
-            todo!()
+        async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {
+            self.calls.push((address, args.to_vec()));
+            Ok(0)
         }
 
         fn system(&mut self) -> &mut System {
@@ -186,8 +195,8 @@ pub mod test {
                 .ok_or_else(|| WieError::FatalError(format!("Missing test resource: {name}")))
         }
 
-        fn set_timer(&mut self, _due: Instant, _callback: WIPICMethodBody) {
-            todo!()
+        fn set_timer(&mut self, due: Instant, registration: WIPICWord, callback: WIPICMethodBody) {
+            self.timers.push_back((due, registration, callback));
         }
     }
 

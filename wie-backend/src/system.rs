@@ -34,6 +34,8 @@ pub struct System {
     audio: Arc<RwLock<Audio>>,
     task_runner: Arc<dyn TaskRunner>,
     random_state: Arc<RwLock<u32>>,
+    // Adapter root only; WIPI registration links and cancellation state live in guest memory.
+    wipi_timer_head: Arc<RwLock<u32>>,
 }
 
 impl System {
@@ -54,7 +56,16 @@ impl System {
             audio: Arc::new(RwLock::new(Audio::new(audio_sink))),
             task_runner: Arc::new(task_runner),
             random_state: Arc::new(RwLock::new(1)),
+            wipi_timer_head: Arc::new(RwLock::new(0)),
         }
+    }
+
+    pub fn wipi_timer_head(&self) -> u32 {
+        *self.wipi_timer_head.read()
+    }
+
+    pub fn set_wipi_timer_head(&self, address: u32) {
+        *self.wipi_timer_head.write() = address;
     }
 
     pub fn tick(&mut self) -> Result<()> {

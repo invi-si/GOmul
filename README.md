@@ -12,6 +12,10 @@ A Korean feature-phone emulator based on [WIE](https://github.com/dlunch/wie) by
 
 [Build instructions](docs/build.md) · [Local Action Hero setup](docs/action-hero-setup.md) · [Compatibility](docs/compatibility.md) · [Release audit](docs/release-audit.md)
 
+## Development since 0.1.0
+
+The source now includes WIPI timer cancellation correctness, opt-in input/timer diagnostics, deterministic CPU replay and regression tests. See the [performance research index](docs/performance-research.md) for findings, rejected experiments and measurement limits. The downloadable 0.1.0 APK predates these changes.
+
 ## Tested games
 
 These observations come from private testing with user-supplied copies. Different carrier releases may behave differently.

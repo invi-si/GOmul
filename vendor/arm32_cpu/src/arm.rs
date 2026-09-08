@@ -99,8 +99,12 @@ impl Cpu {
         #[cfg(feature = "profiling")]
         self.profiling.instruction_set(false);
         let pc = self.reg[reg::PC];
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::fetch(true);
         let inst = profile_span!(self, Fetch, mmu.r32(pc));
         let inst_type = profile_span!(self, Decode, self::Instruction::decode(inst));
+        #[cfg(feature = "exact-counts")]
+        { crate::exact_counts::fetch(false); crate::exact_counts::instruction(pc, inst, false, inst_type as u32, inst_type); }
 
         let cond = inst.extract(28, 4);
         #[cfg(feature = "profiling")]
@@ -145,7 +149,10 @@ impl Cpu {
             .wrapping_add(4)
         );
 
-        if !profile_span!(self, Condition, cond_met(cond, cpsr)) {
+        let taken = profile_span!(self, Condition, cond_met(cond, cpsr));
+        #[cfg(feature = "exact-counts")]
+        if matches!(inst_type, Instruction::Branch | Instruction::BranchEx) { crate::exact_counts::branch(cond != 14, taken); }
+        if !taken {
             #[cfg(feature = "profiling")]
             self.profiling.condition_failed();
             trace!("cond not met");

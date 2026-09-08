@@ -6,6 +6,9 @@ license.workspace = true
 description.workspace = true
 repository.workspace = true
 
+[features]
+cpu-transcript-capture = ["wie-core-arm/cpu-transcript-capture", "wie-wipi-c/cpu-transcript-capture"]
+
 [dependencies]
 async-recursion = { workspace = true }
 async-trait = { workspace = true }

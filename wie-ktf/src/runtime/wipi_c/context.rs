@@ -27,6 +27,15 @@ impl KtfWIPICContext {
 
 #[async_trait::async_trait]
 impl WIPICContext for KtfWIPICContext {
+    #[cfg(feature = "cpu-transcript-capture")]
+    fn transcript_begin(&mut self, callback: u64) {
+        self.core.transcript_begin(callback);
+    }
+    #[cfg(feature = "cpu-transcript-capture")]
+    fn transcript_end(&mut self, callback: u64, ok: bool) {
+        self.core.transcript_end(callback, ok);
+    }
+
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {
         Allocator::alloc(&mut self.core, size)
     }
@@ -149,15 +158,20 @@ impl WIPICContext for KtfWIPICContext {
         Ok(data)
     }
 
-    fn set_timer(&mut self, due: Instant, callback: WIPICMethodBody) {
+    fn set_timer(&mut self, due: Instant, registration: WIPICWord, callback: WIPICMethodBody) {
         let context = self.clone();
 
-        self.system().event_queue().push(Event::timer(due, move || {
+        self.system().event_queue().push(Event::timer_checked(due, move || {
             let mut context = context.clone();
 
             async move {
+                // Consume immediately before entry, without an intervening await.
+                // This also checks registrations deferred outside the backend queue.
+                if !wie_wipi_c::timer::begin(&mut context, registration)? {
+                    return Ok(false);
+                }
                 callback.call(&mut context, Box::new([])).await?;
-                Ok(())
+                Ok(true)
             }
         }))
     }

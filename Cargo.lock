@@ -6082,6 +6082,7 @@ dependencies = [
  "async-trait",
  "directories",
  "jni 0.21.1",
+ "libc",
  "log",
  "serde_json",
  "sha2",

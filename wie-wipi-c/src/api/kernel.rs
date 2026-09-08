@@ -1,3 +1,4 @@
+use wie_util::input_trace::{self as trace, TimerRegistration};
 mod sprintf;
 
 use alloc::{
@@ -83,6 +84,9 @@ pub async fn def_timer(context: &mut dyn WIPICContext, ptr_timer: WIPICWord, fn_
     let timer = WIPICTimer { fn_callback };
 
     write_generic(context, ptr_timer, timer)?;
+    let operation = trace::next_id();
+    trace::event(111, b'I', operation, ptr_timer as u64);
+    trace::event(112, b'I', operation, fn_callback as u64);
 
     Ok(())
 }
@@ -97,6 +101,7 @@ pub async fn set_timer(
     tracing::debug!("MC_knlSetTimer({ptr_timer:#x}, {timeout_low:#x}, {timeout_high:#x}, {param:#x})");
 
     struct TimerCallback {
+        registration: TimerRegistration,
         ptr_timer: WIPICWord,
         fn_callback: WIPICWord,
         param: WIPICWord,
@@ -106,7 +111,20 @@ pub async fn set_timer(
     impl MethodBody<WieError> for TimerCallback {
         #[tracing::instrument(name = "timer", skip_all)]
         async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
-            context.call_function(self.fn_callback, &[self.ptr_timer, self.param]).await?;
+            #[cfg(feature = "cpu-transcript-capture")]
+            context.transcript_begin(self.registration.id());
+            let result = self
+                .registration
+                .observe(
+                    self.ptr_timer as u64,
+                    self.fn_callback as u64,
+                    self.param as u64,
+                    context.call_function(self.fn_callback, &[self.ptr_timer, self.param]),
+                )
+                .await;
+            #[cfg(feature = "cpu-transcript-capture")]
+            context.transcript_end(self.registration.id(), result.is_ok());
+            result?;
 
             Ok(WIPICResult { results: Vec::new() })
         }
@@ -116,9 +134,15 @@ pub async fn set_timer(
     let timeout = (((timeout_high as u64) << 32) | (timeout_low as u64)) as _;
     let timer: WIPICTimer = read_generic(context, ptr_timer)?;
 
+    let due = now + timeout;
+    let registration = TimerRegistration::new(ptr_timer as u64, timer.fn_callback as u64, param as u64, timeout, due.raw(), now.raw());
+    let cancellation = crate::timer::register(context, ptr_timer)?;
+    let _enqueue_scope = registration.enqueue_scope();
     context.set_timer(
-        now + timeout,
+        due,
+        cancellation,
         Box::new(TimerCallback {
+            registration,
             ptr_timer,
             fn_callback: timer.fn_callback,
             param,
@@ -128,8 +152,10 @@ pub async fn set_timer(
     Ok(())
 }
 
-pub async fn unset_timer(_: &mut dyn WIPICContext, a0: WIPICWord) -> Result<()> {
-    tracing::warn!("stub MC_knlUnsetTimer({a0:#x})");
+pub async fn unset_timer(context: &mut dyn WIPICContext, a0: WIPICWord) -> Result<()> {
+    tracing::debug!("MC_knlUnsetTimer({a0:#x})");
+    trace::event(119, b'I', trace::next_id(), a0 as u64);
+    crate::timer::cancel(context, a0)?;
 
     Ok(())
 }

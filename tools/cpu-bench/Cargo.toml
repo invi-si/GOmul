@@ -9,7 +9,10 @@ publish = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
+exact-counts = ["replay", "wie-core-arm/cpu-exact-counts"]
+transcript-verify = ["replay", "wie-core-arm/cpu-transcript-verify"]
 replay = ["wie-core-arm/cpu-replay"]
+experimental-thumb-inline = ["wie-core-arm/experimental-thumb-inline"]
 experimental-thumb-blocks = ["wie-core-arm/experimental-thumb-blocks"]
 experimental-pc-local = ["wie-core-arm/experimental-pc-local"]
 experimental-thumb-table = ["wie-core-arm/experimental-thumb-table"]
@@ -38,3 +41,16 @@ required-features = ["replay"]
 name = "replay_counts"
 path = "examples/replay_counts.rs"
 required-features = ["replay", "throughput"]
+
+[[example]]
+name = "transcript"
+path = "examples/transcript.rs"
+required-features = ["replay"]
+
+[[example]]
+name = "transcript_counts"
+required-features = ["exact-counts"]
+
+[[example]]
+name = "transcript_native_profile"
+required-features = ["replay"]

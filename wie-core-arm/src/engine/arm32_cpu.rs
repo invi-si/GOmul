@@ -24,6 +24,8 @@ mod thumb_blocks;
 pub mod replay;
 
 pub struct Arm32CpuEngine {
+    #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+    last_run_steps: u32,
     #[cfg(feature = "experimental-thumb-blocks")]
     blocks: thumb_blocks::BlockCache,
     cpu: Cpu,
@@ -44,6 +46,8 @@ impl Arm32CpuEngine {
     pub fn new() -> Self {
         Self {
             cpu: Cpu::new(),
+            #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+            last_run_steps: 0,
             #[cfg(feature = "experimental-thumb-blocks")]
             blocks: thumb_blocks::BlockCache::new(),
             mem: EmulatedMemory::new(),
@@ -110,6 +114,8 @@ impl Arm32CpuEngine {
 
 impl ArmEngine for Arm32CpuEngine {
     fn run(&mut self, end: u32, mut count: u32) -> Result<EngineRunResult> {
+        let initial_budget = count;
+        let mut run_trace = wie_util::input_trace::span(wie_util::input_trace::CPU, count as u64);
         #[cfg(feature = "cpu-throughput")]
         let (mut arm_steps, mut thumb_steps) = (0u32, 0u32);
         #[cfg(feature = "cpu-throughput")]
@@ -119,6 +125,11 @@ impl ArmEngine for Arm32CpuEngine {
 
         macro_rules! finish {
             ($result:expr) => {{
+                run_trace.result += (initial_budget - count) as u64;
+                #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+                {
+                    self.last_run_steps = run_trace.result as u32;
+                }
                 #[cfg(feature = "cpu-throughput")]
                 {
                     self.throughput.record_run(arm_steps, thumb_steps);
@@ -202,6 +213,9 @@ impl ArmEngine for Arm32CpuEngine {
                 arm_steps += 1;
             }
             if !decoded {
+                // An undefined decode is still one attempted step, though the budget
+                // decrement below is not reached. This only adjusts diagnostic metadata.
+                run_trace.result += 1;
                 finish!(Err(WieError::FatalError("Undefined instruction".into())));
             }
             count -= 1;
@@ -297,14 +311,25 @@ type PageTable = [Option<Box<[u8; PAGE_SIZE]>>; PAGE_COUNT];
 
 struct EmulatedMemory {
     pages: Box<PageTable>,
+    #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+    dirty: Option<replay::transcript::DirtyPages>,
 }
 
 impl EmulatedMemory {
     fn new() -> Self {
         Self {
+            #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+            dirty: None,
             // Allocate on the heap, then preserve the fixed address-space size in
             // the type so guest page indices need no dynamic length check.
             pages: vec![None; PAGE_COUNT].into_boxed_slice().try_into().ok().expect("fixed page count"),
+        }
+    }
+
+    #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+    fn touch(&mut self, index: usize) {
+        if let Some(dirty) = &mut self.dirty {
+            dirty.touch(index);
         }
     }
 
@@ -317,6 +342,8 @@ impl EmulatedMemory {
         let page_end = (address + size as u32 + PAGE_MASK) & !PAGE_MASK;
 
         for page in (page_start..page_end).step_by(PAGE_SIZE) {
+            #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+            self.touch(page as usize / PAGE_SIZE);
             let page_data = &mut self.pages[page as usize / PAGE_SIZE];
             if page_data.is_none() {
                 *page_data = Some(Box::new([0; PAGE_SIZE]));
@@ -350,6 +377,8 @@ impl EmulatedMemory {
 
         while data_index < data.len() {
             let page_address = current_address & !PAGE_MASK;
+            #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+            self.touch(page_address as usize / PAGE_SIZE);
             let page_data = self.pages[page_address as usize / PAGE_SIZE]
                 .as_mut()
                 .ok_or(WieError::InvalidMemoryAccess(current_address))?;
@@ -414,6 +443,8 @@ impl<'a> Arm32CpuMemory<'a> {
 
 impl Memory for Arm32CpuMemory<'_> {
     fn r8(&mut self, addr: u32) -> u8 {
+        #[cfg(feature = "cpu-exact-counts")]
+        arm32_cpu::exact_counts::memory(1, false);
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -427,6 +458,8 @@ impl Memory for Arm32CpuMemory<'_> {
     }
 
     fn r16(&mut self, addr: u32) -> u16 {
+        #[cfg(feature = "cpu-exact-counts")]
+        arm32_cpu::exact_counts::memory(2, false);
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -440,6 +473,8 @@ impl Memory for Arm32CpuMemory<'_> {
     }
 
     fn r32(&mut self, addr: u32) -> u32 {
+        #[cfg(feature = "cpu-exact-counts")]
+        arm32_cpu::exact_counts::memory(4, false);
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -455,6 +490,10 @@ impl Memory for Arm32CpuMemory<'_> {
     }
 
     fn w8(&mut self, addr: u32, val: u8) {
+        #[cfg(feature = "cpu-exact-counts")]
+        arm32_cpu::exact_counts::memory(1, true);
+        #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+        self.emulated_memory.touch(addr as usize / PAGE_SIZE);
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -468,6 +507,10 @@ impl Memory for Arm32CpuMemory<'_> {
     }
 
     fn w16(&mut self, addr: u32, val: u16) {
+        #[cfg(feature = "cpu-exact-counts")]
+        arm32_cpu::exact_counts::memory(2, true);
+        #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+        self.emulated_memory.touch(addr as usize / PAGE_SIZE);
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -482,6 +525,10 @@ impl Memory for Arm32CpuMemory<'_> {
     }
 
     fn w32(&mut self, addr: u32, val: u32) {
+        #[cfg(feature = "cpu-exact-counts")]
+        arm32_cpu::exact_counts::memory(4, true);
+        #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+        self.emulated_memory.touch(addr as usize / PAGE_SIZE);
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -527,7 +574,10 @@ mod tests {
 
     #[test]
     fn page_table_is_heap_allocated() {
+        #[cfg(not(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify")))]
         assert_eq!(size_of::<EmulatedMemory>(), size_of::<Box<super::PageTable>>());
+        #[cfg(any(feature = "cpu-transcript-capture", feature = "cpu-transcript-verify"))]
+        assert!(size_of::<EmulatedMemory>() < 128); // Page table remains boxed with diagnostic metadata.
     }
 
     #[test]
@@ -902,5 +952,29 @@ mod tests {
             assert!(matches!(empty.run(0x20000, 10), Err(WieError::InvalidMemoryAccess(0x900))));
             check(&empty, 0, 0);
         }
+    }
+}
+
+#[cfg(all(test, feature = "cpu-exact-counts"))]
+mod exact_count_tests {
+    use super::*;
+    #[test]
+    fn fetch_and_data_width_counts_exclude_host_restore() {
+        let mut engine = Arm32CpuEngine::new();
+        engine.mem.map(0x10000, PAGE_SIZE);
+        engine.mem.write_range(0x10000, &[0x08, 0x60, 0x0a, 0x88]).unwrap(); // STR r0,[r1]; LDRH r2,[r1]
+        engine.cpu.reg_set(Mode::User, reg::CPSR, 0x30);
+        engine.cpu.reg_set(Mode::User, reg::PC, 0x10000);
+        engine.cpu.reg_set(Mode::User, 0, 0x12345678);
+        engine.cpu.reg_set(Mode::User, 1, 0x10100);
+        arm32_cpu::exact_counts::reset();
+        arm32_cpu::exact_counts::enable(true);
+        assert!(matches!(engine.run(0x10004, 2), Ok(EngineRunResult::End)));
+        arm32_cpu::exact_counts::enable(false);
+        let before = arm32_cpu::exact_counts::snapshot();
+        assert_eq!(before.memory, [2, 0, 0, 1, 0, 0, 0, 1]);
+        assert_eq!(engine.cpu.reg_get(Mode::User, 2), 0x5678);
+        engine.mem.write_range(0x10100, &[0]).unwrap();
+        assert_eq!(arm32_cpu::exact_counts::snapshot(), before);
     }
 }

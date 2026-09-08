@@ -31,6 +31,10 @@ pub fn take_capture() -> Option<CapturedRun> {
     capture
 }
 pub(crate) fn try_record(engine: &mut dyn ArmEngine, end: u32, count: u32) -> Option<Result<EngineRunResult>> {
+    #[cfg(feature = "cpu-transcript-capture")]
+    if let Some(result) = transcript::try_record(engine, end, count) {
+        return Some(result);
+    }
     if STATE.load(Ordering::Relaxed) != 1 {
         return None;
     }
@@ -384,3 +388,6 @@ mod tests {
         assert!(Replay::new(c).is_err());
     }
 }
+
+#[path = "cpu_transcript.rs"]
+pub mod transcript;

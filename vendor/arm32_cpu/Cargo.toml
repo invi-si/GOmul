@@ -40,6 +40,7 @@ license = "MIT"
 repository = "https://github.com/dlunch/arm32_cpu"
 
 [features]
+exact-counts = ["serde-serialize"]
 experimental-thumb-inline = []
 experimental-pc-local = []
 experimental-thumb-table = []

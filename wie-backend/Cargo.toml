@@ -7,6 +7,7 @@ description.workspace = true
 repository.workspace = true
 
 [features]
+input-trace = ["wie-util/input-trace"]
 checkpoint-replay = []
 
 [dependencies]

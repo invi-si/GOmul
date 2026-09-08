@@ -6,6 +6,9 @@ license.workspace = true
 description.workspace = true
 repository.workspace = true
 
+[features]
+input-trace = []
+
 [dependencies]
 bytemuck = { workspace = true }
 tracing = { workspace = true }

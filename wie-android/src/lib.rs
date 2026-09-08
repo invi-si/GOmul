@@ -2,6 +2,11 @@
 //! worker; JNI carries input, complete frames and audio commands only.
 mod audio;
 mod checkpoint;
+#[cfg(all(feature = "input-trace", target_os = "android"))]
+mod input_trace;
+#[cfg(any(test, all(feature = "input-trace", target_os = "android")))]
+mod trace_aggregate;
+use wie_util::input_trace as trace;
 #[cfg(feature = "native-cpu-bench")]
 mod cpu_bench;
 #[cfg(feature = "cpu-replay")]
@@ -14,7 +19,7 @@ mod loader;
 
 use jni::{
     JNIEnv,
-    objects::{JClass, JIntArray, JString},
+    objects::{JClass, JIntArray, JLongArray, JString},
     sys::{jboolean, jbyteArray, jint, jlong, jstring},
 };
 use sha2::{Digest, Sha256};
@@ -48,6 +53,7 @@ struct Frame {
     dirty: bool,
     redraw: bool,
     paints: u64,
+    published_ns: u64,
 }
 impl Default for Frame {
     fn default() -> Self {
@@ -58,6 +64,7 @@ impl Default for Frame {
             dirty: true,
             redraw: true,
             paints: 0,
+            published_ns: 0,
         }
     }
 }
@@ -80,6 +87,7 @@ impl Screen for Output {
         Ok(())
     }
     fn paint(&self, image: &dyn Image) {
+        let _span = trace::span(trace::PAINT, 0);
         let pixels: Vec<i32> = image
             .colors()
             .iter()
@@ -93,6 +101,11 @@ impl Screen for Output {
         f.pixels = pixels;
         f.dirty = true;
         f.paints += 1;
+        #[cfg(all(feature = "input-trace", target_os = "android"))]
+        {
+            f.published_ns = input_trace::now();
+        }
+        trace::event(trace::PUBLISH, b'I', f.paints, f.published_ns);
     }
     fn width(&self) -> u32 {
         self.0.frame.lock().unwrap().width
@@ -159,7 +172,7 @@ impl Platform for AndroidPlatform {
     fn vibrate(&self, _: u64, _: u8) {}
 }
 enum Command {
-    Key(KeyCode, bool),
+    Key(KeyCode, bool, u64),
     Pause(bool),
     Stop,
     Checkpoint(String, Sender<std::result::Result<String, String>>),
@@ -261,16 +274,24 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
                         deliver(&mut *emulator, &tape, Event::Keyup(key));
                     }
                 }
-                Command::Key(key, true) if !paused && !halted => {
+                Command::Key(key, true, id) if !paused && !halted => {
+                    trace::event(trace::DEQUEUE, b'I', id, 1);
+                    trace::set_input(id);
                     if let std::collections::hash_map::Entry::Vacant(e) = held.entry(key) {
                         e.insert(HostInstant::now());
+                        trace::event(trace::DELIVERY, b'I', id, 1);
                         deliver(&mut *emulator, &tape, Event::Keydown(key));
                     }
+                    trace::set_input(0);
                 }
-                Command::Key(key, false) => {
+                Command::Key(key, false, id) => {
+                    trace::event(trace::DEQUEUE, b'I', id, 0);
+                    trace::set_input(id);
                     if held.remove(&key).is_some() {
+                        trace::event(trace::DELIVERY, b'I', id, 0);
                         deliver(&mut *emulator, &tape, Event::Keyup(key));
                     }
+                    trace::set_input(0);
                 }
                 _ => {}
             }
@@ -293,7 +314,11 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
             deliver(&mut *emulator, &tape, Event::Redraw);
         }
         tape.lock().unwrap().tick();
-        if let Err(error) = emulator.tick() {
+        let tick_result = {
+            let _span = trace::span(trace::TICK, 0);
+            emulator.tick()
+        };
+        if let Err(error) = tick_result {
             halted = true;
             *shared.status.lock().unwrap() = format!("Error: {error}. Quick Load available.");
             continue;
@@ -481,7 +506,17 @@ pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_checkpoint(mut env:
     }
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_key(mut env: JNIEnv, _: JClass, key: JString, down: jboolean) {
+pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_key(
+    mut env: JNIEnv,
+    _: JClass,
+    key: JString,
+    down: jboolean,
+    id: jlong,
+    event_ns: jlong,
+    listener_ns: jlong,
+) {
+    trace::event(trace::INPUT, b'I', id as u64, event_ns as u64);
+    trace::event(25, b'I', id as u64, listener_ns as u64);
     if let Ok(key) = env.get_string(&key) {
         let text: String = key.into();
         if [
@@ -494,15 +529,18 @@ pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_key(mut env: JNIEnv
                 "R" => KeyCode::RIGHT_SOFT_KEY,
                 _ => KeyCode::parse(&text),
             };
-            send(Command::Key(code, down != 0));
+            trace::event(trace::ENQUEUE, b'B', id as u64, u64::from(down != 0));
+            send(Command::Key(code, down != 0, id as u64));
+            trace::event(trace::ENQUEUE, b'E', id as u64, u64::from(down != 0));
         }
     }
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_frame(mut env: JNIEnv, _: JClass, out: JIntArray) -> jlong {
+pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_frame(mut env: JNIEnv, _: JClass, out: JIntArray, metadata: JLongArray) -> jlong {
     let Some(s) = shared() else {
         return 0;
     };
+    let _span = trace::span(trace::FRAME_COPY, 0);
     let mut f = s.frame.lock().unwrap();
     if !f.dirty {
         return 0;
@@ -514,6 +552,13 @@ pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_frame(mut env: JNIE
     if env.set_int_array_region(&out, 0, &f.pixels).is_err() {
         return 0;
     }
+    if env
+        .set_long_array_region(&metadata, 0, &[f.paints as i64, f.published_ns as i64])
+        .is_err()
+    {
+        return 0;
+    }
+    trace::event(trace::PICKUP, b'I', f.paints, f.published_ns);
     f.dirty = false;
     (i64::from(f.width) << 32) | i64::from(f.height)
 }
@@ -534,4 +579,32 @@ pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_audio(env: JNIEnv, 
     };
     env.byte_array_from_slice(&audio::packet(c))
         .map_or(std::ptr::null_mut(), |b| b.into_raw())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_tracePoint(_: JNIEnv, _: JClass, kind: jint, id: jlong, value: jlong) {
+    #[cfg(all(feature = "input-trace", target_os = "android"))]
+    if kind == 200 {
+        input_trace::census(value != 0);
+        return;
+    }
+    trace::event(kind as u16, b'I', id as u64, value as u64);
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_traceControl(mut env: JNIEnv, _: JClass, active: jboolean, path: JString) {
+    #[cfg(all(feature = "input-trace", target_os = "android"))]
+    {
+        if active != 0 {
+            input_trace::start();
+        } else if let Ok(path) = env.get_string(&path) {
+            let path: String = path.into();
+            if let Err(error) = input_trace::stop(std::path::Path::new(&path)) {
+                let _ = env.throw_new("java/lang/IllegalStateException", error.to_string());
+            }
+        }
+    }
+    #[cfg(not(all(feature = "input-trace", target_os = "android")))]
+    {
+        let _ = (env, active, path);
+    }
 }

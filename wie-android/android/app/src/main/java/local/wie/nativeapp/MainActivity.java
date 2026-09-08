@@ -26,7 +26,22 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  private File dataImportGame;
  private File activeGame;private boolean foreground=false,starting=false;private final int[] pixels=new int[1024*1024];
  private long lastReport=0,lastPaints=0;
- @Override public void onCreate(Bundle state){super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);audio=new AudioOutput(getCacheDir());if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::handleBack);showLibrary();}
+ private boolean tracing=false;
+ private long nextInput=0,nextDraw=0;
+ private final long[] frameMetadata=new long[2];
+ private final Map<String,Long> pressIds=new HashMap<>();
+ @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(intent.hasExtra("timerCensus"))NativeBridge.tracePoint(200,0,intent.getBooleanExtra("timerCensus",false)?1:0);if(intent.hasExtra("tracePhase"))NativeBridge.tracePoint(94,intent.getIntExtra("tracePhase",0),0);if(intent.hasExtra("trace"))setTracing(intent.getBooleanExtra("trace",false));}
+ private void setTracing(boolean enabled){
+  if(enabled==tracing)return;
+  if(enabled){NativeBridge.traceControl(true,"");tracing=true;}
+  else{tracing=false;File output=new File(getExternalFilesDir(null),"input-trace.csv");io.execute(()->{NativeBridge.traceControl(false,output.getAbsolutePath());Log.i("GOmul-Trace","Saved "+output);});}
+ }
+
+ @Override public void onCreate(Bundle state){super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);audio=new AudioOutput(getCacheDir());if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::handleBack);showLibrary();
+  if(Build.VERSION.SDK_INT>=36)getWindow().addOnFrameMetricsAvailableListener((window,metrics,dropped)->{
+   if(tracing){long id=metrics.getMetric(FrameMetrics.FRAME_TIMELINE_VSYNC_ID);NativeBridge.tracePoint(27,id,metrics.getMetric(FrameMetrics.INTENDED_VSYNC_TIMESTAMP));NativeBridge.tracePoint(28,id,metrics.getMetric(FrameMetrics.VSYNC_TIMESTAMP));NativeBridge.tracePoint(29,id,metrics.getMetric(FrameMetrics.TOTAL_DURATION));NativeBridge.tracePoint(30,id,dropped);}
+  },new Handler(getMainLooper()));
+ }
  private static void copy(InputStream in,OutputStream out)throws IOException{byte[] b=new byte[65536];int n;while((n=in.read(b))!=-1)out.write(b,0,n);}
  private static byte[] readBytes(InputStream in)throws IOException{ByteArrayOutputStream out=new ByteArrayOutputStream();copy(in,out);return out.toByteArray();}
  private int dp(float value){return (int)(value*getResources().getDisplayMetrics().density+0.5f);}
@@ -253,7 +268,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     b.setTextSize(utility?12:20);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setTextColor(primary?0xff20252a:utility?0xff454a50:0xff282d33);b.setPadding(0,0,0,0);b.setContentDescription(code);
     b.setBackground(metalKey(primary));row.addView(b,cell);
     final boolean[] touchClick={false};
-    b.setOnTouchListener((v,event)->{switch(event.getActionMasked()){case MotionEvent.ACTION_DOWN:key(code,true);b.setPressed(true);return true;case MotionEvent.ACTION_UP:key(code,false);b.setPressed(false);touchClick[0]=true;b.performClick();touchClick[0]=false;return true;case MotionEvent.ACTION_CANCEL:key(code,false);b.setPressed(false);return true;}return true;});
+    b.setOnTouchListener((v,event)->{long entry=System.nanoTime();long eventNs=Build.VERSION.SDK_INT>=34?event.getEventTimeNanos():event.getEventTime()*1000000L;switch(event.getActionMasked()){case MotionEvent.ACTION_DOWN:key(code,true,eventNs,entry);b.setPressed(true);return true;case MotionEvent.ACTION_UP:key(code,false,eventNs,entry);b.setPressed(false);touchClick[0]=true;b.performClick();touchClick[0]=false;return true;case MotionEvent.ACTION_CANCEL:key(code,false,eventNs,entry);b.setPressed(false);return true;}return true;});
     b.setOnClickListener(v->{if(touchClick[0])return;key(code,true);b.postDelayed(()->key(code,false),150);});
    }
   }
@@ -301,7 +316,15 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    String notice=message;runOnUiThread(()->{checkpointBusy=false;Toast.makeText(this,notice,Toast.LENGTH_LONG).show();});
   });
  }
- private void key(String code,boolean down){if(activeGame==null||starting||checkpointBusy)return;if(down?held.add(code):held.remove(code))NativeBridge.key(code,down);}
+ private void key(String code,boolean down){key(code,down,0,System.nanoTime());}
+ private void key(String code,boolean down,long eventNs,long listenerNs){
+  if(activeGame==null||starting||checkpointBusy)return;
+  if(down?held.add(code):held.remove(code)){
+   long id=++nextInput;Long press=down?id:pressIds.remove(code);if(down)pressIds.put(code,id);
+   if(tracing)NativeBridge.tracePoint(26,id,press==null?0:press);
+   NativeBridge.key(code,down,id,eventNs,listenerNs);
+  }
+ }
  private void releaseKeys(){for(String k:new ArrayList<>(held))key(k,false);}
  private void leaveGame(){if(starting||checkpointBusy)return;releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();runOnUiThread(()->{starting=false;showLibrary();});});}
  // API 33+ uses the registered platform callback; keep this for Android 8–12.
@@ -312,11 +335,14 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  @Override protected void onPause(){foreground=false;releaseKeys();NativeBridge.pause(true);audio.pause(true);Choreographer.getInstance().removeFrameCallback(this);super.onPause();}
  @Override protected void onDestroy(){io.execute(NativeBridge::stop);io.shutdown();audio.close();super.onDestroy();}
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);releaseKeys();if(activeGame!=null){Bitmap old=gameView==null?null:gameView.bitmap;showGame();gameView.bitmap=old;}else showLibrary();}
- @Override public void doFrame(long nanos){if(!foreground)return;if(activeGame!=null&&!starting&&!checkpointBusy){long shape=NativeBridge.frame(pixels);if(shape!=0){int w=(int)(shape>>>32),h=(int)shape;if(gameView.bitmap==null||gameView.bitmap.getWidth()!=w||gameView.bitmap.getHeight()!=h)gameView.bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);gameView.bitmap.setPixels(pixels,0,w,0,0,w,h);gameView.invalidate();}
+ @Override public void doFrame(long nanos){if(!foreground)return;if(tracing)NativeBridge.tracePoint(20,nanos,System.nanoTime());if(activeGame!=null&&!starting&&!checkpointBusy){long shape=NativeBridge.frame(pixels,frameMetadata);if(shape!=0){int w=(int)(shape>>>32),h=(int)shape;if(gameView.bitmap==null||gameView.bitmap.getWidth()!=w||gameView.bitmap.getHeight()!=h)gameView.bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);if(tracing)NativeBridge.tracePoint(31,frameMetadata[0],0);gameView.bitmap.setPixels(pixels,0,w,0,0,w,h);gameView.paintId=frameMetadata[0];if(tracing)NativeBridge.tracePoint(21,gameView.paintId,0);gameView.invalidate();}
    for(int i=0;i<8;i++){byte[] packet=NativeBridge.audio();if(packet==null)break;audio.submit(packet);}
    long now=SystemClock.elapsedRealtime();if(now-lastReport>=1000){String current=NativeBridge.status();status.setText(current.equals("Running")?activeGame.getName():current);long paints=NativeBridge.paints();if(lastReport!=0)Log.i("WIE-Native","frames="+(paints-lastPaints)+" elapsedMs="+(now-lastReport)+" state="+current);lastReport=now;lastPaints=paints;}}
   Choreographer.getInstance().postFrameCallback(this);
  }
  private void error(Exception e){Log.e("WIE-Native","Operation failed",e);new AlertDialog.Builder(this).setTitle("Unable to open game").setMessage(e.getMessage()).setPositiveButton("OK",null).show();}
- private class GameView extends View {Bitmap bitmap;final Paint paint=new Paint();final RectF destination=new RectF();GameView(){super(MainActivity.this);setBackgroundColor(Color.BLACK);paint.setFilterBitmap(false);}protected void onDraw(Canvas canvas){super.onDraw(canvas);if(bitmap==null)return;float scale=Math.min(getWidth()/(float)bitmap.getWidth(),getHeight()/(float)bitmap.getHeight());float w=bitmap.getWidth()*scale,h=bitmap.getHeight()*scale;destination.set((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2);canvas.drawBitmap(bitmap,null,destination,paint);}}
+ private class GameView extends View {Bitmap bitmap;long paintId;final Paint paint=new Paint();final RectF destination=new RectF();GameView(){super(MainActivity.this);setBackgroundColor(Color.BLACK);paint.setFilterBitmap(false);}protected void onDraw(Canvas canvas){super.onDraw(canvas);if(bitmap==null)return;float scale=Math.min(getWidth()/(float)bitmap.getWidth(),getHeight()/(float)bitmap.getHeight());float w=bitmap.getWidth()*scale,h=bitmap.getHeight()*scale;destination.set((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2);long drawId=++nextDraw,drawPaint=paintId;boolean capture=tracing;
+ if(capture){Trace.beginSection("GOmulDraw:"+drawId+":"+drawPaint);NativeBridge.tracePoint(22,drawId,drawPaint);}
+ canvas.drawBitmap(bitmap,null,destination,paint);
+ if(capture){NativeBridge.tracePoint(32,drawId,drawPaint);Trace.endSection();if(Build.VERSION.SDK_INT>=29&&isHardwareAccelerated())getViewTreeObserver().registerFrameCommitCallback(()->{if(tracing)NativeBridge.tracePoint(23,drawId,drawPaint);});}}}
 }

@@ -116,11 +116,13 @@ impl Executor {
         T: Fn() -> Instant,
         O: Fn(&mut [usize]) -> Result<()>,
     {
+        let mut trace = wie_util::input_trace::span(wie_util::input_trace::EXECUTOR, 0);
         let end = now() + 8; // TODO hardcoded
         loop {
             let now = now();
 
             if now > end {
+                trace.result = 1;
                 break;
             }
 
@@ -130,6 +132,7 @@ impl Executor {
                 if running_task_count == 0 && !inner.sleeping_tasks.is_empty() {
                     let next_wakeup = *inner.sleeping_tasks.values().min().unwrap();
                     if now < next_wakeup {
+                        trace.result = 2;
                         break;
                     }
                 }
@@ -146,12 +149,14 @@ impl Executor {
     }
 
     fn step(&mut self, now: Instant, _order: &impl Fn(&mut [usize]) -> Result<()>) -> Result<()> {
+        let _trace = wie_util::input_trace::span(wie_util::input_trace::PASS, now.raw());
         self.inner.lock().last_now = now;
 
         let mut next_tasks = HashMap::new();
         let tasks = self.inner.lock().tasks.drain().collect::<HashMap<_, _>>();
         let mut sleeping_tasks = self.inner.lock().sleeping_tasks.drain().collect::<HashMap<_, _>>();
 
+        wie_util::input_trace::event(wie_util::input_trace::TASK_COUNTS, b'I', tasks.len() as u64, sleeping_tasks.len() as u64);
         let mut first_error = None;
 
         #[cfg(feature = "checkpoint-replay")]
@@ -184,7 +189,13 @@ impl Executor {
             let mut context = Context::from_waker(&waker);
             self.inner.lock().current_task_id = Some(task_id);
 
-            match task.as_mut().poll(&mut context) {
+            let poll = {
+                let mut trace = wie_util::input_trace::span(wie_util::input_trace::TASK, task_id as u64);
+                let poll = task.as_mut().poll(&mut context);
+                trace.result = u64::from(poll.is_ready());
+                poll
+            };
+            match poll {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(err)) => {
                     if first_error.is_none() {

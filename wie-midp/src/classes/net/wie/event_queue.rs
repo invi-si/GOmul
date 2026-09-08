@@ -1,6 +1,5 @@
 use alloc::{string::ToString, vec, vec::Vec};
 
-use futures::TryFutureExt;
 use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult};
 use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
 use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
@@ -8,6 +7,7 @@ use rustjava_runtime::classes::java::lang::Runnable;
 
 use wie_backend::{Event, KeyCode};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+use wie_util::input_trace as trace;
 
 use crate::classes::javax::microedition::midlet::MIDlet;
 
@@ -196,10 +196,13 @@ impl EventQueue {
     ) -> JvmResult<()> {
         tracing::debug!("net.wie.EventQueue::getNextEvent({this:?}, {event:?})");
 
+        let _next = trace::wall_span(71, 0);
         let mut pending_timer_events = Vec::new();
         loop {
+            let cycle = trace::wall_span(79, 0);
             let call_serially_events = jvm.get_field(&this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
             let callback_count: i32 = jvm.invoke_virtual(&call_serially_events, "java/util/Vector", "size", "()I", ()).await?;
+            trace::event(81, b'I', cycle.id, callback_count as u64);
             if callback_count > 0 {
                 let midlet: ClassInstanceRef<MIDlet> = jvm
                     .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
@@ -207,21 +210,27 @@ impl EventQueue {
                 if !midlet.is_null() {
                     let display = MIDlet::display(jvm, &midlet).await?;
                     // A frontend Redraw may not have reached the backend queue yet.
-                    let _: () = jvm
-                        .invoke_virtual(&display, "javax/microedition/lcdui/Display", "serviceRepaints", "()V", ())
-                        .await?;
+                    let _: () = trace::observe(
+                        72,
+                        cycle.id,
+                        jvm.invoke_virtual(&display, "javax/microedition/lcdui/Display", "serviceRepaints", "()V", ()),
+                    )
+                    .await?;
                 }
             }
             // Callbacks queued during delivery wait until the next event-loop iteration.
+            let batch = trace::wall_span(73, callback_count as u64);
             for _ in 0..callback_count {
                 let event: ClassInstanceRef<Runnable> = jvm
                     .invoke_virtual(&call_serially_events, "java/util/Vector", "remove", "(I)Ljava/lang/Object;", (0,))
                     .await?;
-                let _: () = jvm.invoke_virtual(&event, "java/lang/Runnable", "run", "()V", ()).await?;
+                let _: () = trace::observe(74, cycle.id, jvm.invoke_virtual(&event, "java/lang/Runnable", "run", "()V", ())).await?;
             }
 
+            drop(batch);
             let now = context.system().platform().now();
-            let maybe_event = context.system().event_queue().pop();
+            let (maybe_event, event_id) = context.system().event_queue().pop_traced();
+            drop(cycle);
 
             if let Some(x) = maybe_event {
                 match &x {
@@ -251,18 +260,25 @@ impl EventQueue {
                         0,
                     ],
                     Event::Timer { due, callback } => {
+                        trace::event(80, b'I', event_id.raw(), u64::from(due <= now));
+                        trace::event(87, b'I', event_id.raw(), now.raw());
                         // TODO we should wait for timer more efficiently
                         if due <= now {
-                            callback()
-                                .or_else(async |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
-                                .await?;
+                            let ran = match trace::observe(75, event_id.raw(), callback()).await {
+                                Ok(ran) => ran,
+                                Err(error) => return Err(jvm.exception("net/wie/WieError", &error.to_string()).await),
+                            };
+                            if !ran {
+                                trace::event(126, b'I', event_id.raw(), 0);
+                                continue;
+                            }
                             // A callback can rearm a timer that is already due by
                             // the time it finishes. Let the host process input and
                             // presentation before consuming another callback.
-                            context.system().yield_now().await;
+                            trace::observe(76, event_id.raw(), context.system().yield_now()).await;
                         } else {
                             // push it to event queue again
-                            pending_timer_events.push(Event::Timer { due, callback });
+                            pending_timer_events.push((Event::Timer { due, callback }, event_id));
                         }
 
                         continue;
@@ -272,19 +288,20 @@ impl EventQueue {
                 };
 
                 jvm.store_array(&mut event, 0, event_data).await?;
+                trace::event(82, b'I', _next.id, event_id.raw());
 
                 break;
             } else {
-                context.system().sleep(16).await; // TODO we need to wait for events
+                trace::observe(77, 0, context.system().sleep(16)).await; // TODO we need to wait for events
 
-                for event in pending_timer_events.drain(..) {
-                    context.system().event_queue().push(event);
+                for (event, id) in pending_timer_events.drain(..) {
+                    context.system().event_queue().push_traced(event, id);
                 }
             }
         }
 
-        for event in pending_timer_events {
-            context.system().event_queue().push(event);
+        for (event, id) in pending_timer_events {
+            context.system().event_queue().push_traced(event, id);
         }
 
         Ok(())
@@ -297,6 +314,7 @@ impl EventQueue {
         event: ClassInstanceRef<Array<i32>>,
     ) -> JvmResult<()> {
         tracing::debug!("net.wie.EventQueue::dispatchEvent({this:?}, {event:?})");
+        let dispatch = trace::wall_span(78, 0);
 
         let current_midlet: ClassInstanceRef<MIDlet> = jvm
             .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
@@ -320,6 +338,7 @@ impl EventQueue {
                 .await);
         };
 
+        trace::event(83, b'I', dispatch.id, event[0] as u64);
         match event_kind {
             EventQueueEvent::RepaintEvent => {
                 // serviceRepaints may have already consumed the Java request
@@ -476,6 +495,77 @@ mod test {
             );
             assert_eq!(callbacks.load(Ordering::Relaxed), 2);
             assert!(matches!(system.event_queue().pop(), Some(Event::Timer { .. })));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn cancelled_due_timer_skips_yield_and_preserves_live_event_order() -> Result<()> {
+        run_jvm_test_with_system(Box::new([get_protos().into()]), Box::new(TestPlatform::new()), |jvm, system| async move {
+            let queue: ClassInstanceRef<EventQueue> = jvm
+                .invoke_static("net/wie/EventQueue", "getEventQueue", "()Lnet/wie/EventQueue;", ())
+                .await?;
+            let event: ClassInstanceRef<Array<i32>> = jvm.instantiate_array("I", 4).await?.into();
+            system
+                .event_queue()
+                .push(Event::timer_checked(Instant::from_epoch_millis(0), || async { Ok(false) }));
+            system.event_queue().push(Event::Keydown(KeyCode::NUM1));
+            let callbacks = Arc::new(AtomicU32::new(0));
+            let count = callbacks.clone();
+            system.event_queue().push(Event::timer(Instant::from_epoch_millis(0), move || async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }));
+            let mut next_event = Box::pin(async {
+                jvm.invoke_virtual::<_, ()>(&queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),))
+                    .await
+            });
+            // A canceled timer must not insert a cooperative yield ahead of the key.
+            assert!(matches!(
+                next_event.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                core::task::Poll::Ready(Ok(()))
+            ));
+            assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+            assert_eq!(jvm.load_array::<i32>(&event, 0, 4).await?[2], MIDPKeyCode::KEY_NUM1 as i32);
+            assert!(matches!(system.event_queue().pop(), Some(Event::Timer { .. })));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn deferred_timer_checks_cancellation_after_reinsertion() -> Result<()> {
+        let clock = test_utils::TestClock::new();
+        let platform = TestPlatform::with_clock(clock.clone());
+        run_jvm_test_with_system(Box::new([get_protos().into()]), Box::new(platform), |jvm, system| async move {
+            let queue: ClassInstanceRef<EventQueue> = jvm
+                .invoke_static("net/wie/EventQueue", "getEventQueue", "()Lnet/wie/EventQueue;", ())
+                .await?;
+            let event: ClassInstanceRef<Array<i32>> = jvm.instantiate_array("I", 4).await?.into();
+            let cancelled = Arc::new(core::sync::atomic::AtomicBool::new(false));
+            let flag = cancelled.clone();
+            let callbacks = Arc::new(AtomicU32::new(0));
+            let count = callbacks.clone();
+            system
+                .event_queue()
+                .push(Event::timer_checked(Instant::from_epoch_millis(60), move || async move {
+                    if flag.load(Ordering::Relaxed) {
+                        return Ok(false);
+                    }
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok(true)
+                }));
+            let mut next_event = Box::pin(jvm.invoke_virtual::<_, ()>(&queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),)));
+            assert!(next_event.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(system.event_queue().pop().is_none()); // timer is in getNextEvent's local vector
+            cancelled.store(true, Ordering::Relaxed);
+            clock.set(100);
+            // One more poll reinserts and consumes the canceled due timer, then sleeps again.
+            assert!(next_event.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+            assert!(system.event_queue().pop().is_none());
+            system.event_queue().push(Event::Keydown(KeyCode::NUM1));
+            next_event.await?;
+            assert_eq!(callbacks.load(Ordering::Relaxed), 0);
             Ok(())
         })
     }

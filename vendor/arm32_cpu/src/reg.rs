@@ -112,6 +112,8 @@ impl RegFile {
 
     #[inline]
     pub fn mode(&self) -> Mode {
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::mode_read();
         // `expect` should never be fired, as mode bits are checked to be valid when
         // setting the CPSR value.
         Mode::from_bits(self.reg[CPSR as usize].extract(0, 5) as u8)
@@ -125,6 +127,8 @@ impl RegFile {
 
     #[inline]
     pub fn set(&mut self, bank: usize, reg: Reg, mut val: u32) {
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::register(reg, true);
         if reg == CPSR {
             let bits = val.extract(0, 5) as u8;
             let mode = Mode::from_bits(bits);
@@ -142,6 +146,8 @@ impl RegFile {
                     bits
                 );
 
+                #[cfg(feature = "exact-counts")]
+                crate::exact_counts::invalid_cpsr_read();
                 let oldval = self.reg[CPSR as usize];
                 val = (val & !0x1f) | (oldval & 0x1f);
             }
@@ -155,6 +161,8 @@ impl RegFile {
 
     #[inline]
     pub fn get(&self, bank: usize, reg: Reg) -> u32 {
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::register(reg, false);
         self.reg[REG_MAP[bank][reg as usize]]
     }
 }
@@ -163,6 +171,8 @@ impl Index<Reg> for RegFile {
     type Output = u32;
     #[inline]
     fn index(&self, idx: Reg) -> &u32 {
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::register(idx, false);
         &self.reg[REG_MAP[self.bank][idx as usize]]
     }
 }
@@ -170,6 +180,8 @@ impl Index<Reg> for RegFile {
 impl IndexMut<Reg> for RegFile {
     #[inline]
     fn index_mut(&mut self, idx: Reg) -> &mut u32 {
+        #[cfg(feature = "exact-counts")]
+        crate::exact_counts::register(idx, true);
         &mut self.reg[REG_MAP[self.bank][idx as usize]]
     }
 }
@@ -178,6 +190,20 @@ impl IndexMut<Reg> for RegFile {
 mod mapping_tests {
     use super::*;
 
+    #[test]
+    fn shared_and_banked_slots_survive_mode_switches() {
+        let mut regs = RegFile::new_empty();
+        for (i, value) in regs.reg.iter_mut().enumerate() { *value = 0x12340000 | i as u32; }
+        for (bank, mode) in [0x10, 0x11, 0x12, 0x13, 0x17, 0x1b].iter().enumerate() {
+            regs.set(0, CPSR, *mode);
+            let mut expected = regs.reg;
+            for idx in 0..=17u8 {
+                assert_eq!(regs[idx], expected[REG_MAP[bank][idx as usize]]);
+                if idx != CPSR && idx != SPSR { regs[idx] = 0x55000000 + idx as u32; expected[REG_MAP[bank][idx as usize]] = 0x55000000 + idx as u32; }
+            }
+            assert_eq!(regs.reg, expected);
+        }
+    }
     #[test]
     fn current_reads_match_every_bank_and_register() {
         for (bank, map) in REG_MAP.iter().enumerate() {

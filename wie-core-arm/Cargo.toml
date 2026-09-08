@@ -7,6 +7,9 @@ description.workspace = true
 repository.workspace = true
 
 [features]
+cpu-exact-counts = ["cpu-transcript-verify", "arm32_cpu/exact-counts"]
+cpu-transcript-verify = ["cpu-replay"]
+cpu-transcript-capture = ["cpu-replay", "wie-util/input-trace"]
 cpu-replay = ["arm32_cpu/serde-serialize"]
 experimental-thumb-inline = ["arm32_cpu/experimental-thumb-inline"]
 experimental-thumb-blocks = []

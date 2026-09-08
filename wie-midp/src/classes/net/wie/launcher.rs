@@ -77,12 +77,24 @@ impl MethodBody<JavaError, WieJvmContext> for EventLoopRunner {
 
         let event = jvm.instantiate_array("I", 4).await?;
         loop {
-            let _: () = jvm
-                .invoke_virtual(&event_queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),))
-                .await?;
-            let _: () = jvm
-                .invoke_virtual(&event_queue, "net/wie/EventQueue", "dispatchEvent", "([I)V", (event.clone(),))
-                .await?;
+            let iteration = wie_util::input_trace::wall_span(70, 0);
+            if wie_util::input_trace::enabled() {
+                let task = _context.system().current_task_id();
+                wie_util::input_trace::event(67, b'I', iteration.id, task);
+                wie_util::input_trace::event(68, b'I', task, 1); // role 1: EventLoopRunner
+            }
+            let _: () = wie_util::input_trace::observe(
+                89,
+                iteration.id,
+                jvm.invoke_virtual(&event_queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),)),
+            )
+            .await?;
+            let _: () = wie_util::input_trace::observe(
+                88,
+                iteration.id,
+                jvm.invoke_virtual(&event_queue, "net/wie/EventQueue", "dispatchEvent", "([I)V", (event.clone(),)),
+            )
+            .await?;
         }
     }
 }
