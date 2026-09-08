@@ -8,6 +8,11 @@ pub trait Platform: Send + Sync {
         None
     }
 
+    /// Checkpoint adapters may record/replay the observed task order. Normal hosts leave it unchanged.
+    fn task_order(&self, _tasks: &mut [usize]) -> wie_util::Result<()> {
+        Ok(())
+    }
+
     fn font(&self) -> &Font;
     fn screen(&self) -> &dyn Screen;
     fn now(&self) -> Instant;

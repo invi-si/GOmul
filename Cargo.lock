@@ -6084,6 +6084,7 @@ dependencies = [
  "jni 0.21.1",
  "log",
  "serde_json",
+ "sha2",
  "tracing",
  "tracing-subscriber",
  "wie-backend",

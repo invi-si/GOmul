@@ -57,3 +57,5 @@ python3 scripts/release-audit.py
 ```
 
 Regenerate third-party notices after dependency changes with `python3 scripts/generate-rust-notices.py` and `python3 wie-android/generate-notices.py`.
+
+Standalone Android also exposes these controls using experimental replay checkpoints. See [behavior and limits](android-checkpoints.md). They do not require the Mac helper.

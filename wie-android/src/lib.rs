@@ -1,6 +1,7 @@
 //! Native Android adapter. Guest CPU, memory and WIPI services live on one Rust
 //! worker; JNI carries input, complete frames and audio commands only.
 mod audio;
+mod checkpoint;
 #[cfg(feature = "native-cpu-bench")]
 mod cpu_bench;
 #[cfg(feature = "cpu-replay")]
@@ -16,6 +17,7 @@ use jni::{
     objects::{JClass, JIntArray, JString},
     sys::{jboolean, jbyteArray, jint, jlong, jstring},
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -24,7 +26,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant as HostInstant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant as HostInstant},
 };
 use wie_backend::{AudioCommand, AudioSink, Event, Filesystem, Font, Instant, KeyCode, Platform, Screen, canvas::Image};
 
@@ -34,7 +36,11 @@ struct Shared {
     audio: Mutex<VecDeque<AudioCommand>>,
     status: Mutex<String>,
     exiting: std::sync::atomic::AtomicBool,
+    stopping: std::sync::atomic::AtomicBool,
+    replaying: std::sync::atomic::AtomicBool,
+    active_audio: Mutex<HashMap<u32, AudioCommand>>,
 }
+#[derive(Clone)]
 struct Frame {
     width: u32,
     height: u32,
@@ -97,11 +103,22 @@ impl Screen for Output {
 }
 impl AudioSink for Output {
     fn send(&self, c: AudioCommand) {
-        self.0.audio.lock().unwrap().push_back(c);
+        match &c {
+            AudioCommand::Play { handle, .. } => {
+                self.0.active_audio.lock().unwrap().insert(*handle, c.clone());
+            }
+            AudioCommand::Stop { handle } => {
+                self.0.active_audio.lock().unwrap().remove(handle);
+            }
+        }
+        if !self.0.replaying.load(std::sync::atomic::Ordering::Relaxed) {
+            self.0.audio.lock().unwrap().push_back(c);
+        }
     }
 }
 struct AndroidPlatform {
     phone_number: Option<String>,
+    tape: Arc<Mutex<checkpoint::Tape>>,
     output: Output,
     font: Font,
     db: database::DatabaseRepository,
@@ -118,7 +135,10 @@ impl Platform for AndroidPlatform {
         &self.output
     }
     fn now(&self) -> Instant {
-        Instant::from_epoch_millis(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64)
+        Instant::from_epoch_millis(self.tape.lock().unwrap().now())
+    }
+    fn task_order(&self, tasks: &mut [usize]) -> wie_util::Result<()> {
+        self.tape.lock().unwrap().order(tasks)
     }
     fn database_repository(&self) -> &dyn wie_backend::DatabaseRepository {
         &self.db
@@ -142,6 +162,7 @@ enum Command {
     Key(KeyCode, bool),
     Pause(bool),
     Stop,
+    Checkpoint(String, Sender<std::result::Result<String, String>>),
 }
 struct Session {
     shared: Arc<Shared>,
@@ -155,6 +176,7 @@ fn session() -> &'static Mutex<Option<Session>> {
 fn stop() {
     let old = session().lock().unwrap().take();
     if let Some(old) = old {
+        old.shared.stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = old.tx.send(Command::Stop);
         let _ = old.thread.join();
     }
@@ -173,6 +195,123 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
     };
     #[cfg(feature = "cpu-replay")]
     let mut cpu_capture = cpu_replay::Controller::new(&save);
+    let mut slots = checkpoint::Slots::new(&save)?;
+    let archive_id = Sha256::digest(std::fs::read(&path)?).to_vec();
+    let mut tape = Arc::new(Mutex::new(checkpoint::Tape::default()));
+    let mut emulator = create_emulator(&path, &save, shared.clone(), tape.clone())?;
+    *shared.status.lock().unwrap() = "Running".into();
+    let mut held = HashMap::new();
+    let mut paused = false;
+    let mut halted = false;
+    loop {
+        let command = rx.recv_timeout(Duration::from_millis(if paused || halted { 100 } else { 1 }));
+        let commands = command.into_iter().chain(rx.try_iter());
+        for command in commands {
+            match command {
+                Command::Stop => return Ok(()),
+                Command::Checkpoint(action, reply) => {
+                    for (key, _) in held.drain() {
+                        deliver(&mut *emulator, &tape, Event::Keyup(key));
+                    }
+                    let result = (|| -> anyhow::Result<String> {
+                        if action == "save" {
+                            anyhow::ensure!(!halted, "Cannot save a stopped game; Quick Load remains available");
+                            slots.store("quick", &tape.lock().unwrap(), &frame_bytes(&shared.frame.lock().unwrap()), &archive_id)?;
+                            return Ok("Quick Save created on this device (experimental).".into());
+                        }
+                        anyhow::ensure!(action == "load" || action == "recover", "Unknown checkpoint action");
+                        let name = if action == "recover" { "recovery" } else { "quick" };
+                        // The current runtime remains alive until reconstruction succeeds.
+                        let recovery = action == "load" && !halted && tape.lock().unwrap().error.is_none();
+                        if recovery {
+                            slots.store(
+                                "recovery",
+                                &tape.lock().unwrap(),
+                                &frame_bytes(&shared.frame.lock().unwrap()),
+                                &archive_id,
+                            )?;
+                        }
+                        let restored = restore(&path, &save, &shared, &slots, name, &archive_id)?;
+                        emulator = restored.0;
+                        tape = restored.1;
+                        slots.initial = restored.2;
+                        halted = false;
+                        Ok(if action == "load" && !recovery {
+                            "Quick Load complete. No undo was created for the stopped/expired session."
+                        } else {
+                            "Quick Load complete. Active audio restarts from its beginning."
+                        }
+                        .into())
+                    })()
+                    .map_err(|e| e.to_string());
+                    if result.is_err() && slots.root.join("rollback").exists() {
+                        halted = true;
+                    }
+                    if action != "save" {
+                        let mut queue = shared.audio.lock().unwrap();
+                        queue.clear();
+                        queue.extend(shared.active_audio.lock().unwrap().values().cloned());
+                    }
+                    *shared.status.lock().unwrap() = if halted { "Game stopped; Quick Load available" } else { "Running" }.into();
+                    let _ = reply.send(result);
+                }
+                Command::Pause(value) => {
+                    paused = value;
+                    for (key, _) in held.drain() {
+                        deliver(&mut *emulator, &tape, Event::Keyup(key));
+                    }
+                }
+                Command::Key(key, true) if !paused && !halted => {
+                    if let std::collections::hash_map::Entry::Vacant(e) = held.entry(key) {
+                        e.insert(HostInstant::now());
+                        deliver(&mut *emulator, &tape, Event::Keydown(key));
+                    }
+                }
+                Command::Key(key, false) => {
+                    if held.remove(&key).is_some() {
+                        deliver(&mut *emulator, &tape, Event::Keyup(key));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if paused || halted {
+            continue;
+        }
+        for (&key, time) in &mut held {
+            if time.elapsed() > Duration::from_millis(100) {
+                *time = HostInstant::now();
+                deliver(&mut *emulator, &tape, Event::Keyrepeat(key));
+            }
+        }
+        tape.lock().unwrap().redraw();
+        let redraw = {
+            let mut f = shared.frame.lock().unwrap();
+            std::mem::take(&mut f.redraw)
+        };
+        if redraw {
+            deliver(&mut *emulator, &tape, Event::Redraw);
+        }
+        tape.lock().unwrap().tick();
+        if let Err(error) = emulator.tick() {
+            halted = true;
+            *shared.status.lock().unwrap() = format!("Error: {error}. Quick Load available.");
+            continue;
+        }
+        #[cfg(feature = "cpu-replay")]
+        cpu_capture.poll();
+        if shared.exiting.load(std::sync::atomic::Ordering::Relaxed) {
+            halted = true;
+            *shared.status.lock().unwrap() = "Game stopped; Quick Load available".into();
+        }
+    }
+}
+fn create_emulator(
+    path: &str,
+    save: &str,
+    shared: Arc<Shared>,
+    tape: Arc<Mutex<checkpoint::Tape>>,
+) -> anyhow::Result<Box<dyn wie_backend::Emulator>> {
     let phone_number = match std::fs::read_to_string(PathBuf::from(&save).join("phone-number.txt")) {
         Ok(value) => {
             let value = value.trim();
@@ -187,65 +326,98 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
     };
     let platform = AndroidPlatform {
         phone_number,
+        tape,
         output: Output(shared.clone()),
         font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf"))?,
         db: database::DatabaseRepository::at_path(PathBuf::from(&save)),
         fs: filesystem::CliFilesystem::at_path(PathBuf::from(save)),
     };
-    let mut emulator = loader::load(&path, Box::new(platform))?;
-    *shared.status.lock().unwrap() = "Running".into();
-    let mut held = HashMap::new();
-    let mut paused = false;
-    loop {
-        let command = rx.recv_timeout(Duration::from_millis(if paused { 100 } else { 1 }));
-        let commands = command.into_iter().chain(rx.try_iter());
-        for command in commands {
-            match command {
-                Command::Stop => return Ok(()),
-                Command::Pause(value) => {
-                    paused = value;
-                    for (key, _) in held.drain() {
-                        emulator.handle_event(Event::Keyup(key));
-                    }
-                }
-                Command::Key(key, true) if !paused => {
-                    if let std::collections::hash_map::Entry::Vacant(e) = held.entry(key) {
-                        e.insert(HostInstant::now());
-                        emulator.handle_event(Event::Keydown(key));
-                    }
-                }
-                Command::Key(key, false) => {
-                    if held.remove(&key).is_some() {
-                        emulator.handle_event(Event::Keyup(key));
-                    }
-                }
-                _ => {}
-            }
-        }
-        if paused {
-            continue;
-        }
-        for (&key, time) in &mut held {
-            if time.elapsed() > Duration::from_millis(100) {
-                *time = HostInstant::now();
-                emulator.handle_event(Event::Keyrepeat(key));
-            }
-        }
-        let redraw = {
-            let mut f = shared.frame.lock().unwrap();
-            std::mem::take(&mut f.redraw)
-        };
-        if redraw {
-            emulator.handle_event(Event::Redraw);
-        }
-        emulator.tick()?;
-        #[cfg(feature = "cpu-replay")]
-        cpu_capture.poll();
-        if shared.exiting.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(());
-        }
-    }
+    loader::load(path, Box::new(platform))
 }
+fn deliver(emulator: &mut dyn wie_backend::Emulator, tape: &Mutex<checkpoint::Tape>, event: Event) {
+    tape.lock().unwrap().event(&event);
+    emulator.handle_event(event);
+}
+fn frame_bytes(frame: &Frame) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(frame.pixels.len() * 4 + 17);
+    bytes.extend(frame.width.to_le_bytes());
+    bytes.extend(frame.height.to_le_bytes());
+    bytes.extend(frame.paints.to_le_bytes());
+    bytes.push(u8::from(frame.redraw));
+    for p in &frame.pixels {
+        bytes.extend(p.to_le_bytes());
+    }
+    bytes
+}
+type Restored = (
+    Box<dyn wie_backend::Emulator>,
+    Arc<Mutex<checkpoint::Tape>>,
+    std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+);
+fn restore(path: &str, save: &str, shared: &Arc<Shared>, slots: &checkpoint::Slots, name: &str, archive: &[u8]) -> anyhow::Result<Restored> {
+    let (recording, initial, frame, expected) = slots.begin_load(name, archive)?;
+    let before = shared.frame.lock().unwrap().clone();
+    let audio_before = shared.active_audio.lock().unwrap().clone();
+    let exit_before = shared.exiting.swap(false, std::sync::atomic::Ordering::Relaxed);
+    *shared.frame.lock().unwrap() = Frame::default();
+    shared.active_audio.lock().unwrap().clear();
+    shared.audio.lock().unwrap().clear();
+    shared.replaying.store(true, std::sync::atomic::Ordering::Relaxed);
+    *shared.status.lock().unwrap() = "Reconstructing checkpoint…".into();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Restored> {
+        let tape = Arc::new(Mutex::new(recording));
+        let mut candidate = create_emulator(path, save, shared.clone(), tape.clone())?;
+        let started = HostInstant::now();
+        loop {
+            {
+                let t = tape.lock().unwrap();
+                t.check()?;
+                if t.done() {
+                    break;
+                }
+            }
+            anyhow::ensure!(!shared.stopping.load(std::sync::atomic::Ordering::Relaxed), "Checkpoint load cancelled");
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(180),
+                "Checkpoint reconstruction exceeded three minutes"
+            );
+            let step = tape.lock().unwrap().next()?;
+            match step {
+                checkpoint::Step::Event(event) => candidate.handle_event(event),
+                checkpoint::Step::ConsumeRedraw => {
+                    shared.frame.lock().unwrap().redraw = false;
+                }
+                checkpoint::Step::Tick => candidate.tick()?,
+            }
+        }
+        anyhow::ensure!(
+            frame_bytes(&shared.frame.lock().unwrap()) == frame,
+            "Checkpoint display mismatch; current session retained"
+        );
+        anyhow::ensure!(
+            checkpoint::tree(&slots.save)? == expected,
+            "Checkpoint save-data mismatch; current session retained"
+        );
+        tape.lock().unwrap().resume()?;
+        slots.commit_load()?;
+        Ok((candidate, tape, initial))
+    }));
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("Checkpoint reconstruction failed")),
+    };
+    shared.replaying.store(false, std::sync::atomic::Ordering::Relaxed);
+    if result.is_err() {
+        *shared.frame.lock().unwrap() = before;
+        *shared.active_audio.lock().unwrap() = audio_before;
+        shared.exiting.store(exit_before, std::sync::atomic::Ordering::Relaxed);
+        slots.rollback()?;
+    }
+    shared.frame.lock().unwrap().dirty = true;
+    shared.audio.lock().unwrap().extend(shared.active_audio.lock().unwrap().values().cloned());
+    result
+}
+
 fn send(command: Command) {
     if let Some(s) = session().lock().unwrap().as_ref() {
         let _ = s.tx.send(command);
@@ -287,6 +459,26 @@ pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_stop(_: JNIEnv, _: 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_pause(_: JNIEnv, _: JClass, paused: jboolean) {
     send(Command::Pause(paused != 0));
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_checkpoint(mut env: JNIEnv, _: JClass, action: JString) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let action: String = env.get_string(&action)?.into();
+        let (tx, rx) = mpsc::channel();
+        {
+            let guard = session().lock().unwrap();
+            let s = guard.as_ref().ok_or_else(|| anyhow::anyhow!("No running game"))?;
+            s.tx.send(Command::Checkpoint(action, tx))?;
+        }
+        rx.recv()?.map_err(anyhow::Error::msg)
+    })();
+    match result {
+        Ok(message) => env.new_string(message).map_or(std::ptr::null_mut(), |s| s.into_raw()),
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalStateException", error.to_string());
+            std::ptr::null_mut()
+        }
+    }
 }
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_key(mut env: JNIEnv, _: JClass, key: JString, down: jboolean) {

@@ -2,12 +2,12 @@
 
 A Korean feature-phone emulator based on [WIE](https://github.com/dlunch/wie) by Inseok Lee (dlunch) and contributors. GOmul adds native Android launcher work, compatibility fixes, CPU experiments, and optional Mac-hosted Android checkpoint controls.
 
-**Early experimental release. Bring your own games.** No commercial games, game saves, authentication data bundles, or device snapshots are distributed here. The original MIT copyright and licence remain in [LICENSE](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md).
+**First release (0.1.0). Bring your own games.** No commercial games, game saves, authentication data bundles, or device snapshots are distributed here. The original MIT copyright and licence remain in [LICENSE](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## What runs where
 
 - **Native Android ARM64:** game library, JAR/ZIP import, automatic companion-data setup, rotation, virtual controls and silver phone-style UI. Compatibility varies by game; this is not a complete WIPI implementation.
-- **Android Virtual Device on macOS:** the same APK plus an optional local checkpoint helper. Quick Save/Load and protected startup states use whole-AVD snapshots; they are not portable save states and do not work on physical Android phones.
+- **Android Virtual Device on macOS:** the same APK plus an optional local checkpoint helper. The optional helper uses whole-AVD Quick Save/Load and protected startup snapshots. Physical Android has a separate experimental [replay checkpoint implementation](docs/android-checkpoints.md), with slower loads and compatibility limits.
 - **Web / Tauri desktop:** experimental source frontends inherited from WIE and extended in this fork. They do not have the native Android checkpoint integration. Windows release binaries have not been validated locally.
 
 [Build instructions](docs/build.md) · [Local Action Hero setup](docs/action-hero-setup.md) · [Compatibility](docs/compatibility.md) · [Release audit](docs/release-audit.md)
@@ -30,3 +30,5 @@ These observations come from private testing with user-supplied copies. Differen
 Report carrier/version, platform, reproduction steps, and whether a fresh save changes the result. Do not attach commercial archives, snapshots, personal phone identities, or memory dumps to public issues. Synthetic reproductions and code fixes are welcome.
 
 General runtime fixes should be proposed upstream as focused changes with regression tests. GOmul-specific launcher and checkpoint work belongs in this fork. There is no affiliation with phone manufacturers, carriers, game publishers, or an endorsement by the WIE author.
+
+Download the Android ARM64 APK from [GOmul 0.1.0 — First Release](https://github.com/invi-si/GOmul/releases/tag/v0.1.0). Standalone replay checkpoints remain experimental; see their [limits and validation](docs/android-checkpoints.md).

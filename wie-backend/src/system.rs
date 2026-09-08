@@ -59,7 +59,7 @@ impl System {
 
     pub fn tick(&mut self) -> Result<()> {
         let platform = self.platform.clone();
-        self.executor.tick(move || platform.now())
+        self.executor.tick_with_order(|| platform.now(), |tasks| platform.task_order(tasks))
     }
 
     pub fn spawn<C>(&self, callable: C)

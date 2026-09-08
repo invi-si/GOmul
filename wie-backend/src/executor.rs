@@ -108,6 +108,14 @@ impl Executor {
     where
         T: Fn() -> Instant,
     {
+        self.tick_with_order(now, |_| Ok(()))
+    }
+
+    pub fn tick_with_order<T, O>(&mut self, now: T, order: O) -> Result<()>
+    where
+        T: Fn() -> Instant,
+        O: Fn(&mut [usize]) -> Result<()>,
+    {
         let end = now() + 8; // TODO hardcoded
         loop {
             let now = now();
@@ -127,7 +135,7 @@ impl Executor {
                 }
             }
 
-            self.step(now)?;
+            self.step(now, &order)?;
         }
 
         Ok(())
@@ -137,7 +145,7 @@ impl Executor {
         self.inner.lock().current_task_id.unwrap() as _
     }
 
-    fn step(&mut self, now: Instant) -> Result<()> {
+    fn step(&mut self, now: Instant, _order: &impl Fn(&mut [usize]) -> Result<()>) -> Result<()> {
         self.inner.lock().last_now = now;
 
         let mut next_tasks = HashMap::new();
@@ -146,6 +154,21 @@ impl Executor {
 
         let mut first_error = None;
 
+        #[cfg(feature = "checkpoint-replay")]
+        let tasks = {
+            let mut tasks = tasks;
+            let mut task_ids: alloc::vec::Vec<_> = tasks.keys().copied().collect();
+            _order(&mut task_ids)?;
+            task_ids
+                .into_iter()
+                .map(|id| {
+                    tasks
+                        .remove(&id)
+                        .map(|task| (id, task))
+                        .ok_or_else(|| WieError::FatalError("Checkpoint task order mismatch".into()))
+                })
+                .collect::<Result<alloc::vec::Vec<_>>>()?
+        };
         for (task_id, mut task) in tasks.into_iter() {
             let item = sleeping_tasks.get(&task_id);
             if let Some(item) = item {

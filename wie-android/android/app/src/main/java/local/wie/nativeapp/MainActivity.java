@@ -212,7 +212,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   TextView tip=label(landscape?"":"Rotate for a wider view",11);tip.setTextColor(0xff4d535b);header.addView(tip);
   root.addView(header,new LinearLayout.LayoutParams(-1,dp(36)));
   gameView=new GameView();
-  boolean checkpoints=new File(getFilesDir(),"mac-checkpoints.json").isFile();
+  boolean checkpoints=true;
   String[][] directions={{"","▲",""},{"◀","OK","▶"},{"","▼",""},{checkpoints?"Quick\nSave":"","CALL",checkpoints?"Quick\nLoad":""}};
   String[][] directionCodes={{"","UP",""},{"LEFT","OK","RIGHT"},{"","DOWN",""},{checkpoints?"SAVE":"","CALL",checkpoints?"LOAD":""}};
   String[][] keys={{"L","CLR","R"},{"1","2","3"},{"4","5","6"},{"7","8","9"},{"*","0","#"}};
@@ -271,9 +271,19 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   }finally{connection.disconnect();}
  }
  private void checkpoint(String action){
-  if(checkpointBusy||starting)return;
+  if(checkpointBusy||starting||activeGame==null)return;
   releaseKeys();checkpointBusy=true;
+  status.setText(action.equals("save")?"Saving checkpoint…":"Reconstructing checkpoint…");
   Toast.makeText(this,action.equals("save")?"Saving checkpoint…":"Saving recovery, then loading…",Toast.LENGTH_SHORT).show();
+  if(!new File(getFilesDir(),"mac-checkpoints.json").isFile()){
+   if(!action.equals("save"))audio.stopAll();
+   io.execute(()->{
+    String notice;
+    try{notice=NativeBridge.checkpoint(action);}catch(Exception error){notice="Checkpoint unavailable: "+error.getMessage();}
+    String result=notice;runOnUiThread(()->{checkpointBusy=false;Toast.makeText(this,result,Toast.LENGTH_LONG).show();});
+   });
+   return;
+  }
   String id=UUID.randomUUID().toString();
   String checkpointGame=activeGame.getParentFile().getName();
   io.execute(()->{
@@ -291,9 +301,9 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    String notice=message;runOnUiThread(()->{checkpointBusy=false;Toast.makeText(this,notice,Toast.LENGTH_LONG).show();});
   });
  }
- private void key(String code,boolean down){if(activeGame==null||starting)return;if(down?held.add(code):held.remove(code))NativeBridge.key(code,down);}
+ private void key(String code,boolean down){if(activeGame==null||starting||checkpointBusy)return;if(down?held.add(code):held.remove(code))NativeBridge.key(code,down);}
  private void releaseKeys(){for(String k:new ArrayList<>(held))key(k,false);}
- private void leaveGame(){if(starting)return;releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();runOnUiThread(()->{starting=false;showLibrary();});});}
+ private void leaveGame(){if(starting||checkpointBusy)return;releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();runOnUiThread(()->{starting=false;showLibrary();});});}
  // API 33+ uses the registered platform callback; keep this for Android 8–12.
  @android.annotation.SuppressLint("GestureBackNavigation")
  @Override public void onBackPressed(){handleBack();}
@@ -302,7 +312,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  @Override protected void onPause(){foreground=false;releaseKeys();NativeBridge.pause(true);audio.pause(true);Choreographer.getInstance().removeFrameCallback(this);super.onPause();}
  @Override protected void onDestroy(){io.execute(NativeBridge::stop);io.shutdown();audio.close();super.onDestroy();}
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);releaseKeys();if(activeGame!=null){Bitmap old=gameView==null?null:gameView.bitmap;showGame();gameView.bitmap=old;}else showLibrary();}
- @Override public void doFrame(long nanos){if(!foreground)return;if(activeGame!=null&&!starting){long shape=NativeBridge.frame(pixels);if(shape!=0){int w=(int)(shape>>>32),h=(int)shape;if(gameView.bitmap==null||gameView.bitmap.getWidth()!=w||gameView.bitmap.getHeight()!=h)gameView.bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);gameView.bitmap.setPixels(pixels,0,w,0,0,w,h);gameView.invalidate();}
+ @Override public void doFrame(long nanos){if(!foreground)return;if(activeGame!=null&&!starting&&!checkpointBusy){long shape=NativeBridge.frame(pixels);if(shape!=0){int w=(int)(shape>>>32),h=(int)shape;if(gameView.bitmap==null||gameView.bitmap.getWidth()!=w||gameView.bitmap.getHeight()!=h)gameView.bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);gameView.bitmap.setPixels(pixels,0,w,0,0,w,h);gameView.invalidate();}
    for(int i=0;i<8;i++){byte[] packet=NativeBridge.audio();if(packet==null)break;audio.submit(packet);}
    long now=SystemClock.elapsedRealtime();if(now-lastReport>=1000){String current=NativeBridge.status();status.setText(current.equals("Running")?activeGame.getName():current);long paints=NativeBridge.paints();if(lastReport!=0)Log.i("WIE-Native","frames="+(paints-lastPaints)+" elapsedMs="+(now-lastReport)+" state="+current);lastReport=now;lastPaints=paints;}}
   Choreographer.getInstance().postFrameCallback(this);
