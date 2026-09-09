@@ -254,8 +254,15 @@ fn run(
                             slots.store("quick", &tape.lock().unwrap(), &frame_bytes(&shared.frame.lock().unwrap()), &archive_id)?;
                             return Ok("Quick Save created on this device (experimental).".into());
                         }
-                        anyhow::ensure!(action == "load" || action == "recover", "Unknown checkpoint action");
-                        let name = if action == "recover" { "recovery" } else { "quick" };
+                        let diagnostic = cfg!(feature = "rescue-replay") && matches!(action.as_str(), "rescue-capture" | "rescue-verify");
+                        anyhow::ensure!(action == "load" || action == "recover" || diagnostic, "Unknown checkpoint action");
+                        let name = if diagnostic {
+                            action.as_str()
+                        } else if action == "recover" {
+                            "recovery"
+                        } else {
+                            "quick"
+                        };
                         // The current runtime remains alive until reconstruction succeeds.
                         let recovery = action == "load" && !halted && tape.lock().unwrap().error.is_none();
                         if recovery {
@@ -450,12 +457,21 @@ fn restore(path: &str, save: &str, shared: &Arc<Shared>, slots: &checkpoint::Slo
                 checkpoint::Step::Tick => candidate.tick()?,
             }
         }
+        #[cfg(feature = "rescue-replay")]
+        if name == "rescue-capture" {
+            let reference = slots.root.join("rescue-reference");
+            anyhow::ensure!(!reference.exists(), "Rescue reference already exists");
+            std::fs::create_dir_all(&reference)?;
+            std::fs::write(reference.join("frame"), frame_bytes(&shared.frame.lock().unwrap()))?;
+            checkpoint::write_tree(&reference.join("expected"), &checkpoint::tree(&slots.save)?)?;
+        }
+        let capture = cfg!(feature = "rescue-replay") && name == "rescue-capture";
         anyhow::ensure!(
-            frame_bytes(&shared.frame.lock().unwrap()) == frame,
+            capture || frame_bytes(&shared.frame.lock().unwrap()) == frame,
             "Checkpoint display mismatch; current session retained"
         );
         anyhow::ensure!(
-            checkpoint::tree(&slots.save)? == expected,
+            capture || checkpoint::tree(&slots.save)? == expected,
             "Checkpoint save-data mismatch; current session retained"
         );
         tape.lock().unwrap().resume()?;

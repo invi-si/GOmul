@@ -46,7 +46,14 @@ public final class RescueInstrumentation extends Instrumentation {
    if(!java.util.Arrays.equals(expected,java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(game.toPath()))))throw new IOException("Game digest mismatch");
    File save=new File(root,"saves/case");copy(new File(report,"initial"),save);
    File slot=new File(root,"checkpoints/case/quick");slot.mkdirs();copy(new File(report,"initial"),new File(slot,"initial"));new File(slot,"expected").mkdirs();
-   for(String name:new String[]{"trace","frame","archive-id","build-id"})Files.copy(new File(report,name).toPath(),new File(slot,name).toPath());
+   String mode=arguments.getString("mode", "load");
+   boolean diagnostic=mode.equals("rescue-capture")||mode.equals("rescue-verify");
+   for(String name:new String[]{"trace","frame","archive-id","build-id"})Files.copy(new File(report,diagnostic&&name.equals("trace")?"safe-trace":name).toPath(),new File(slot,name).toPath());
+   if(mode.equals("rescue-verify")){
+    File reference=new File(arguments.getString("reference"));
+    Files.copy(new File(reference,"frame").toPath(),new File(slot,"frame").toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    copy(new File(reference,"expected"),new File(slot,"expected"));
+   }
    Files.write(new File(slot,"format").toPath(),"GOmul replay alpha4 v1\0".getBytes(java.nio.charset.StandardCharsets.UTF_8));
    NativeBridge.start(game.getAbsolutePath(),save.getAbsolutePath());NativeBridge.pause(true);
    String expectedError=new String(Files.readAllBytes(new File(report,"error.txt").toPath()),java.nio.charset.StandardCharsets.UTF_8);
@@ -56,9 +63,18 @@ public final class RescueInstrumentation extends Instrumentation {
    if(expectedError.endsWith(suffix))expectedError=expectedError.substring(0,expectedError.length()-suffix.length());
    String outcome;
    boolean reproduced=false;
-   try{outcome=NativeBridge.checkpoint("load");}catch(Exception failure){outcome=failure.getMessage();reproduced=expectedError.equals(outcome);}
+   try{outcome=NativeBridge.checkpoint(mode);reproduced=diagnostic;}catch(Exception failure){outcome=failure.getMessage();reproduced=!diagnostic&&expectedError.equals(outcome);}
+   if(diagnostic&&reproduced&&arguments.containsKey("runMs")){
+    NativeBridge.pause(false);Thread.sleep(Long.parseLong(arguments.getString("runMs")));
+    if(arguments.containsKey("keys")){for(String key:arguments.getString("keys").split(",")){NativeBridge.key(key,true,0,0,0);Thread.sleep(100);NativeBridge.key(key,false,0,0,0);Thread.sleep(300);}Thread.sleep(1000);}
+    NativeBridge.pause(true);
+    int[] pixels=new int[1024*1024];long shape=NativeBridge.frame(pixels,new long[4]);
+    if(shape!=0){int width=(int)(shape>>>32),height=(int)shape;android.graphics.Bitmap bitmap=android.graphics.Bitmap.createBitmap(pixels,width,height,android.graphics.Bitmap.Config.ARGB_8888);try(OutputStream png=new FileOutputStream(new File(root,"continuation.png"))){bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,png);}bitmap.recycle();}
+    outcome += "\nContinuation: "+NativeBridge.status()+"; paints="+NativeBridge.paints();
+    reproduced = !NativeBridge.status().startsWith("Error:");
+   }
    Files.write(new File(root,"outcome.txt").toPath(),outcome.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-   result.putString("stream",(reproduced?"Exact recorded failure reproduced: PASS\n":"Recorded failure did not match: FAIL\n")+outcome+"\n");finish(reproduced?0:1,result);
+   result.putString("stream",(reproduced?(diagnostic?"Rescue diagnostic replay: PASS\n":"Exact recorded failure reproduced: PASS\n"):"Rescue reproduction/validation: FAIL\n")+outcome+"\n");finish(reproduced?0:1,result);
   }catch(Throwable e){result.putString("stream",android.util.Log.getStackTraceString(e));finish(1,result);}finally{NativeBridge.stop();}
  }
  private static void copy(File source,File destination)throws IOException{

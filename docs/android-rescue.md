@@ -107,3 +107,6 @@ strong hypothesis, not a verified native ABI contract. Nearby `0x320–0x323`
 currently use time-related placeholders, so implementing `0x329` as a no-op
 would conceal a larger missing component implementation. The exact native API
 contracts and lifecycle still need confirmation before a safe runtime fix.
+
+The first component failure now has a candidate fix and explicit developer
+pre-crash comparison workflow; see [the component report](lgt-native-components-rescue.md).

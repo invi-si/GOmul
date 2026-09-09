@@ -9,6 +9,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
+rescue-replay = []
 cpu-transcript-capture = ["cpu-replay", "wie-core-arm/cpu-transcript-capture", "wie-ktf/cpu-transcript-capture", "wie-lgt/cpu-transcript-capture"]
 input-trace = ["wie-util/input-trace", "wie-backend/input-trace", "dep:libc", "dep:serde_json"]
 frame-diagnostics = ["dep:tracing-subscriber", "tracing/std"]

@@ -371,9 +371,10 @@ impl Slots {
         name: &str,
         archive: &[u8],
     ) -> anyhow::Result<(Tape, BTreeMap<PathBuf, Option<Vec<u8>>>, Vec<u8>, BTreeMap<PathBuf, Option<Vec<u8>>>)> {
-        let slot = self.slot(name);
+        let diagnostic = cfg!(feature = "rescue-replay") && matches!(name, "rescue-capture" | "rescue-verify");
+        let slot = self.slot(if diagnostic { "quick" } else { name });
         anyhow::ensure!(
-            Some(fs::read_to_string(slot.join("build-id"))?.as_str()) == BUILD,
+            diagnostic || Some(fs::read_to_string(slot.join("build-id"))?.as_str()) == BUILD,
             "Checkpoint needs the APK build that created it"
         );
         anyhow::ensure!(
@@ -441,5 +442,25 @@ mod rescue_boundary_tests {
         assert!(matches!(replay.next().unwrap(), Step::Event(Event::Keydown(KeyCode::OK))));
         assert!(matches!(replay.next().unwrap(), Step::Tick));
         assert!(replay.done());
+    }
+}
+
+#[cfg(test)]
+mod rescue_build_gate_tests {
+    use super::*;
+    #[test]
+    fn regular_quick_load_always_checks_build_and_preserves_saves() {
+        let root = std::env::temp_dir().join(format!("gomul-rescue-gate-{}-{}", std::process::id(), wall()));
+        let save = root.join("saves/test");
+        fs::create_dir_all(&save).unwrap();
+        fs::write(save.join("keep"), b"original").unwrap();
+        let slots = Slots::new(save.to_str().unwrap()).unwrap();
+        fs::create_dir_all(slots.root.join("quick")).unwrap();
+        fs::write(slots.root.join("quick/build-id"), b"unrelated-build").unwrap();
+        let error = slots.begin_load("quick", b"archive").err().unwrap().to_string();
+        assert!(error.contains("APK build"));
+        assert_eq!(fs::read(save.join("keep")).unwrap(), b"original");
+        assert!(!slots.root.join("rollback").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }
