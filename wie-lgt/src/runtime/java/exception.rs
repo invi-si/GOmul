@@ -73,6 +73,9 @@ pub fn unwind(core: &mut ArmCore, ptr_exception: u32) -> Result<Option<u32>> {
 
     let ptr_frame = support_context.ptr_current_exception_frame;
     let frame: [u32; FRAME_WORDS as usize] = read_generic(core, ptr_frame)?;
+    // The handler is consumed on exceptional entry. A rethrow must unwind
+    // the enclosing frame, not re-enter this same catch dispatch.
+    support_context.ptr_current_exception_frame = frame[0];
     support_context.ptr_pending_exception = ptr_exception;
     write_generic(core, SUPPORT_CONTEXT_BASE, support_context)?;
 
@@ -95,6 +98,7 @@ pub fn unwind(core: &mut ArmCore, ptr_exception: u32) -> Result<Option<u32>> {
         pc: frame[16],
         cpsr: frame[17],
     };
+    Allocator::free(core, ptr_frame, FRAME_WORDS * size_of::<u32>() as u32)?;
     core.restore_context(&context);
     core.set_next_pc(context.lr)?;
 
@@ -132,11 +136,40 @@ mod tests {
         assert_eq!(restored.pc, 0x4000);
         assert_eq!(pending(&core)?, 0x1234);
 
+        assert_eq!(unwind(&mut core, 0x5678)?, None);
+        // A subsequent normal scope still balances push/pop and clears pending.
+        push(&mut core)?;
+        assert_eq!(pending(&core)?, 0);
         pop(&mut core)?;
         assert_eq!(pending(&core)?, 0);
-        assert_eq!(unwind(&mut core, 0x5678)?, None);
-        assert_eq!(pending(&core)?, 0);
 
+        Ok(())
+    }
+    #[test]
+    fn rethrow_consumes_inner_then_outer_frame() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        Allocator::init(&mut core)?;
+        init(&mut core)?;
+        let mut context = core.save_context();
+        context.lr = 0x4001;
+        context.sp = 0x12000;
+        context.r4 = 4;
+        core.restore_context(&context);
+        push(&mut core)?;
+        context.lr = 0x5001;
+        context.sp = 0x11000;
+        context.r4 = 5;
+        core.restore_context(&context);
+        push(&mut core)?;
+        assert_eq!(unwind(&mut core, 0x1234)?, Some(0x5001));
+        assert_eq!(core.save_context().r4, 5);
+        assert_eq!(core.save_context().sp, 0x11000);
+        assert_eq!(pending(&core)?, 0x1234);
+        assert_eq!(unwind(&mut core, 0x1234)?, Some(0x4001));
+        assert_eq!(core.save_context().r4, 4);
+        assert_eq!(core.save_context().sp, 0x12000);
+        assert_eq!(pending(&core)?, 0x1234);
+        assert_eq!(unwind(&mut core, 0x1234)?, None);
         Ok(())
     }
 }

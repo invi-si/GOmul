@@ -188,6 +188,39 @@ mod tests {
     use crate::runtime::{LgtJvmSupport, java::register_java_system_svc_handler};
 
     #[test]
+    fn thread_alive_compiler_slot_reads_guest_state() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let system_clone = system.clone();
+        system.spawn(async move || {
+            let mut core = ArmCore::new(false, None)?;
+            Allocator::init(&mut core)?;
+            let mut context = core.save_context();
+            context.sp = Allocator::alloc(&mut core, 0x100)? + 0x100;
+            core.restore_context(&context);
+            let jvm = LgtJvmSupport::init(&mut core, &system_clone, None).await?;
+            register_init_svc_handler(&mut core, 0)?;
+            register_java_system_svc_handler(&mut core, &jvm, 0)?;
+            let mut thread = jvm.instantiate_class("java/lang/Thread").await.unwrap();
+            let pointer = LgtJvmSupport::class_instance_raw(&*thread);
+            let dispatch: u32 = read_generic(&core, pointer)?;
+            let target: u32 = read_generic(&core, dispatch + 14 * 4)?;
+            for alive in [false, true, false] {
+                jvm.put_field(&mut thread, "alive", "Z", alive).await.unwrap();
+                let result: u32 = core.run_function(target, &[pointer]).await?;
+                assert_eq!(result, u32::from(alive));
+            }
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        while !done.load(Ordering::Relaxed) {
+            system.tick()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn compiler_array_helpers_build_guest_arrays() -> Result<()> {
         let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
         let done = Arc::new(AtomicBool::new(false));
