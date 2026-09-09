@@ -113,12 +113,28 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   TextView title=label("Your games",32);title.setTypeface(Typeface.DEFAULT,Typeface.BOLD);root.addView(title);
   TextView subtitle=label("A little screen. A whole world.",15);subtitle.setTextColor(0xff4d535b);root.addView(subtitle);
   addSpaced(root,button("＋  Import a game",()->{if(starting)return;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,1);}),54);
-  TextView hint=label("Import .jar / .zip · Hold a game to import saved data",12);hint.setTextColor(0xff4d535b);root.addView(hint);
+  TextView hint=label("Import .jar / .zip · Hold a game for options",12);hint.setTextColor(0xff4d535b);root.addView(hint);
   ScrollView scroll=new ScrollView(this);scroll.setClipToPadding(false);LinearLayout list=column();scroll.addView(list);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-  File[] folders=games().listFiles();if(folders!=null){Arrays.sort(folders);for(File folder:folders){File[] files=folder.listFiles((d,name)->name.toLowerCase(Locale.ROOT).endsWith(".jar")||name.toLowerCase(Locale.ROOT).endsWith(".zip"));if(files!=null)for(File game:files){Button item=button("▶   "+game.getName(),()->launch(game));item.setOnLongClickListener(v->{chooseData(game);return true;});item.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);item.setTextColor(0xff25292e);addSpaced(list,item,72);}}}
+  File[] folders=games().listFiles();if(folders!=null){Arrays.sort(folders);for(File folder:folders){File[] files=folder.listFiles((d,name)->name.toLowerCase(Locale.ROOT).endsWith(".jar")||name.toLowerCase(Locale.ROOT).endsWith(".zip"));if(files!=null)for(File game:files){Button item=button("▶   "+game.getName(),()->launch(game));item.setOnLongClickListener(v->{gameOptions(game);return true;});item.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);item.setTextColor(0xff25292e);addSpaced(list,item,72);}}}
   if(list.getChildCount()==0){TextView empty=label("Your library is ready.\nImport your first game to start playing.",17);empty.setPadding(dp(8),dp(36),dp(8),dp(24));empty.setTextColor(0xff4d535b);list.addView(empty);}
   File lastRescue=RescueReports.latest(getFilesDir(),null);if(lastRescue!=null)addSpaced(root,button("Export last rescue",()->exportRescue(lastRescue)),44);
   addSpaced(root,button("Open-source licences",()->{try(InputStream in=getAssets().open("LICENSES.txt")){new AlertDialog.Builder(this).setTitle("Licences").setMessage(new String(readBytes(in),java.nio.charset.StandardCharsets.UTF_8)).setPositiveButton("Close",null).show();}catch(IOException e){error(e);}}),48);
+ }
+ private void gameOptions(File game){
+  if(starting)return;
+  new AlertDialog.Builder(this).setTitle(game.getName()).setItems(new String[]{"Import saved data","Delete game"},(dialog,which)->{
+   if(which==0){chooseData(game);return;}
+   new AlertDialog.Builder(this).setTitle("Delete this game?").setMessage("Remove "+game.getName()+" from your library? Saved data, Quick Saves and rescue reports will be kept. The original downloaded file is unaffected.")
+    .setNegativeButton("Cancel",null).setPositiveButton("Delete",(confirmation,button)->{
+     starting=true;io.execute(()->{
+      try{
+       java.nio.file.Files.delete(game.toPath());
+       File[] remaining=game.getParentFile().listFiles();if(remaining!=null&&remaining.length==0)game.getParentFile().delete();
+       runOnUiThread(()->{starting=false;showLibrary();Toast.makeText(this,"Game deleted",Toast.LENGTH_SHORT).show();});
+      }catch(Exception failure){runOnUiThread(()->{starting=false;error(failure);});}
+     });
+    }).show();
+  }).show();
  }
  private File saveFolder(File game){return new File(getFilesDir(),"saves/"+game.getParentFile().getName());}
  private void chooseData(File game){
