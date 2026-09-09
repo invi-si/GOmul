@@ -65,3 +65,45 @@ and file copies can take time; the panel appears after capture finishes.
 Next stage: add a developer report-import/replay runner and verify representative
 reports end to end; then measure rolling validated checkpoints before enabling
 any automatic recovery. Rescue v1 alone does not promise resuming through a fix.
+
+## Developer reproduction on the originating build
+
+The Android test APK now accepts an extracted, trusted Rescue report and the
+matching local game. Install the original app build and its Android test APK,
+then run (paths are on the Android device):
+
+```sh
+adb shell am instrument -w \
+  -e rescue /data/local/tmp/rescue-case \
+  -e game /data/local/tmp/game.zip \
+  local.wie.nativeapp.test/local.wie.nativeapp.RescueInstrumentation
+```
+
+The runner checks the archive digest and uses the existing loader's build-ID
+check. It copies initial saves and the full recording into an isolated app-cache
+workspace. The supplied game is read-only; regular saves and Quick Save slots
+are not touched. It compares the complete reproduced native error with the
+report, including registers and stack when present. Exit code zero means the
+recorded failure was reproduced, **not that the game was fixed**. The outcome
+is also retained in `cache/rescue-reproduction/outcome.txt`.
+
+This is a failure-reproduction harness, not a valid successful checkpoint: the
+scratch slot has no expected final saved-data oracle. A replay that completes or
+produces a different error fails this test. It cannot certify a patched build,
+and it does not bypass normal build or checkpoint validation. Run without
+arguments for the synthetic Rescue checks.
+
+### First real report: LGT Vancouver 2010
+
+The original exported recording reproduced `Unknown LGT WIPIC SVC id 809`
+(`0x329`) on the original APK without manual navigation. The native error,
+registers, CPSR and stack matched the report. Game bytes and user saves were
+unchanged. The game and report remain private fixtures, excluded from Git.
+
+Guest call-site inspection places the failure in a component setup sequence:
+`0x321` receives the string `TextComponent`, followed by `0x322`; `0x329`
+receives a handle and arguments `90, 248, 60, 17, 3`. Geometry/configuration is a
+strong hypothesis, not a verified native ABI contract. Nearby `0x320–0x323`
+currently use time-related placeholders, so implementing `0x329` as a no-op
+would conceal a larger missing component implementation. The exact native API
+contracts and lifecycle still need confirmation before a safe runtime fix.
