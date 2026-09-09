@@ -8,6 +8,14 @@ use wie_util::{Result, read_null_terminated_string_bytes};
 use crate::{WIPICContext, api::graphics::FrameBuffer};
 
 pub fn read_text(context: &dyn WIPICContext, address: u32, length: i32) -> Result<Option<String>> {
+    read_text_impl(context, address, length, false)
+}
+
+pub fn read_text_for_measurement(context: &dyn WIPICContext, address: u32, length: i32) -> Result<Option<String>> {
+    read_text_impl(context, address, length, true)
+}
+
+fn read_text_impl(context: &dyn WIPICContext, address: u32, length: i32, measuring: bool) -> Result<Option<String>> {
     let bytes = if length == -1 {
         read_null_terminated_string_bytes(context, address)?
     } else if length >= 0 {
@@ -18,7 +26,20 @@ pub fn read_text(context: &dyn WIPICContext, address: u32, length: i32) -> Resul
         return Ok(None);
     };
 
-    Ok(Some(encoding_rs::EUC_KR.decode(&bytes).0.into_owned()))
+    let mut text = encoding_rs::EUC_KR.decode(&bytes).0.into_owned();
+    if measuring && length >= 0 && text.ends_with('\u{fffd}') {
+        // Byte-by-byte width probes can end at a Korean lead byte. Reserve its
+        // full cell now, so wrapping does not accept half a character. Decode
+        // without EOF to distinguish an incomplete pair from malformed input.
+        let mut decoder = encoding_rs::EUC_KR.new_decoder_without_bom_handling();
+        let mut prefix = String::with_capacity(decoder.max_utf8_buffer_length(bytes.len()).unwrap());
+        let (_, consumed, _) = decoder.decode_to_string(&bytes, &mut prefix, false);
+        if consumed == bytes.len() && text.strip_suffix('\u{fffd}') == Some(prefix.as_str()) {
+            text.pop();
+            text.push('\u{3000}');
+        }
+    }
+    Ok(Some(text))
 }
 
 fn write_canvas<F>(context: &mut dyn WIPICContext, framebuffer: &FrameBuffer, operation: F) -> Result<()>

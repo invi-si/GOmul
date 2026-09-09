@@ -471,7 +471,7 @@ pub async fn get_font_descent(_: &mut dyn WIPICContext, font: i32) -> Result<i32
 pub async fn get_string_width(context: &mut dyn WIPICContext, font: i32, ptr_string: WIPICWord, length: i32) -> Result<i32> {
     tracing::debug!("MC_grpGetStringWidth({font}, {ptr_string:#x}, {length})");
 
-    let Some(string) = primitives::read_text(context, ptr_string, length)? else {
+    let Some(string) = primitives::read_text_for_measurement(context, ptr_string, length)? else {
         return Ok(0);
     };
     Ok(string_width(context.system().platform().font(), &string, 10.0) as i32)
@@ -674,10 +674,38 @@ pub async fn get_framebuffer_bpp(context: &mut dyn WIPICContext, framebuffer: WI
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;
+    use wie_util::ByteWrite;
 
     use crate::{MethodImpl, context::test::TestContext};
 
     use super::*;
+
+    #[futures_test::test]
+    async fn korean_width_probes_reserve_complete_character_cells() -> Result<()> {
+        let mut context = TestContext::with_system(wie_backend::System::new(
+            Box::new(test_utils::TestPlatform::new()),
+            "",
+            "",
+            wie_backend::DefaultTaskRunner,
+        ));
+        let bytes = encoding_rs::EUC_KR.encode("AB 공주님을 찾아").0.into_owned();
+        let address = context.alloc_raw(bytes.len() as u32)?;
+        context.write_bytes(address, &bytes)?;
+        // A caller stops at the first over-width byte and uses the preceding
+        // prefix. Every overflow within a Korean pair must happen on its lead.
+        for start in [3usize, 5, 7, 9, 12, 14] {
+            let lead = get_string_width(&mut context, 0, address, (start + 1) as i32).await?;
+            let complete = get_string_width(&mut context, 0, address, (start + 2) as i32).await?;
+            assert_eq!(lead, complete, "split at byte {start}");
+        }
+        assert_eq!(primitives::read_text(&context, address + 3, 1)?.unwrap(), "\u{fffd}");
+        assert_eq!(primitives::read_text_for_measurement(&context, address + 3, 2)?.unwrap(), "공");
+        assert_eq!(primitives::read_text_for_measurement(&context, address, -2)?, None);
+        // An invalid standalone byte must not be reclassified as a wide glyph.
+        context.write_bytes(address, &[0xff])?;
+        assert_eq!(primitives::read_text_for_measurement(&context, address, 1)?.unwrap(), "\u{fffd}");
+        Ok(())
+    }
 
     #[futures_test::test]
     async fn context_values_are_written_to_the_output_pointer() -> Result<()> {
