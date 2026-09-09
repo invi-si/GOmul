@@ -435,6 +435,44 @@ mod tests {
     use crate::runtime::{LgtJvmSupport, SVC_CATEGORY_WIPIC};
 
     #[test]
+    fn offscreen_cleanup_accepts_null_and_preserves_handle_validation() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let system_clone = system.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        system.spawn(async move || {
+            let mut core = ArmCore::new(false, None)?;
+            Allocator::init(&mut core)?;
+            let mut registers = core.save_context();
+            registers.sp = Allocator::alloc(&mut core, 0x100)? + 0x100;
+            core.restore_context(&registers);
+            let jvm = LgtJvmSupport::init(&mut core, &system_clone, None).await?;
+            register_wipic_svc_handler(&mut core, &system_clone, &jvm)?;
+            let destroy = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0xcbu32)?;
+            let create = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0xccu32)?;
+            for _ in 0..2 {
+                core.run_function::<()>(destroy, &[0]).await?;
+                let handle = core.run_function::<u32>(create, &[8, 8]).await?;
+                assert_ne!(handle, 0);
+                core.run_function::<()>(destroy, &[handle]).await?;
+            }
+            let invalid = Allocator::alloc(&mut core, 16)?;
+            wie_util::write_generic(&mut core, invalid, [0u32; 4])?;
+            assert!(core.run_function::<()>(destroy, &[invalid]).await.is_err());
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        for _ in 0..1000 {
+            system.tick()?;
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        assert!(done.load(Ordering::Relaxed));
+        Ok(())
+    }
+
+    #[test]
     fn request_exit_svc_notifies_platform() -> Result<()> {
         let exit_count = Arc::new(AtomicU32::new(0));
         let observed_exits = exit_count.clone();

@@ -424,6 +424,10 @@ pub async fn create_offscreen_framebuffer(context: &mut dyn WIPICContext, width:
 
 pub async fn destroy_offscreen_framebuffer(context: &mut dyn WIPICContext, handle: WIPICIndirectPtr) -> Result<()> {
     tracing::debug!("MC_grpDestroyOffScreenFrameBuffer({:#x})", handle.0);
+    // LGT applications may clean up an empty slot before its first allocation.
+    if handle.0 == 0 {
+        return Ok(());
+    }
     let public: LgtFramebuffer = read_record(context, handle)?;
     if public.owned_image == 0 || public.ptr_graphics == 0 || public.ptr_image == 0 {
         return Err(WieError::FatalError(alloc::format!("Invalid LGT off-screen framebuffer {:#x}", handle.0)));
