@@ -81,6 +81,21 @@ pub async fn strchr(core: &mut ArmCore, _: &mut (), ptr_str: u32, character: u32
     }
 }
 
+/// Compare at most `len` unsigned bytes, stopping at the first difference or NUL.
+/// Read only bytes required by the comparison, including at mapping boundaries.
+pub async fn strncmp(core: &mut ArmCore, _: &mut (), left: u32, right: u32, len: u32) -> Result<u32> {
+    for offset in 0..len {
+        let mut a = [0];
+        let mut b = [0];
+        core.read_bytes(left.wrapping_add(offset), &mut a)?;
+        core.read_bytes(right.wrapping_add(offset), &mut b)?;
+        if a[0] != b[0] || a[0] == 0 {
+            return Ok((i32::from(a[0]) - i32::from(b[0])) as u32);
+        }
+    }
+    Ok(0)
+}
+
 pub async fn strlen(core: &mut ArmCore, _: &mut (), ptr_str: u32) -> Result<u32> {
     let mut buf = [0u8; STR_SCAN_CHUNK];
     let mut len: u32 = 0;
@@ -97,6 +112,33 @@ pub async fn strlen(core: &mut ArmCore, _: &mut (), ptr_str: u32) -> Result<u32>
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    #[futures_test::test]
+    async fn strncmp_obeys_byte_order_bounds_and_nul() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        core.map(0x10000, 0x1000)?;
+        for (left, right, len, sign) in [
+            (&b"abcX"[..], &b"abcY"[..], 3, 0),
+            (&b"abcX"[..], &b"abcY"[..], 4, -1),
+            (&b"a\0X"[..], &b"a\0Y"[..], 3, 0),
+            (&b"a\0"[..], &b"ab"[..], 2, -1),
+            (&b"\xff"[..], &b"\x7f"[..], 1, 1),
+            (&b"\xbf\xf8\xbc\xfe\0"[..], &b"\xbf\xf8\xbc\xfe\0"[..], 64, 0),
+        ] {
+            core.write_bytes(0x10000, left)?;
+            core.write_bytes(0x10100, right)?;
+            assert_eq!((strncmp(&mut core, &mut (), 0x10000, 0x10100, len).await? as i32).signum(), sign);
+        }
+        assert_eq!(strncmp(&mut core, &mut (), 0x20000, 0x30000, 0).await?, 0);
+        core.write_bytes(0x1ffff, b"x")?;
+        assert_eq!(strncmp(&mut core, &mut (), 0x1ffff, 0x1ffff, 1).await?, 0);
+        assert!(strncmp(&mut core, &mut (), 0x1ffff, 0x1ffff, 2).await.is_err());
+        core.write_bytes(0x1ffff, &[0])?;
+        assert_eq!(strncmp(&mut core, &mut (), 0x1ffff, 0x1ffff, 64).await?, 0);
+        assert!(strncmp(&mut core, &mut (), 0x20000, 0x10000, 1).await.is_err());
+        assert!(strncmp(&mut core, &mut (), 0x10000, 0x20000, 1).await.is_err());
+        Ok(())
+    }
 
     #[futures_test::test]
     async fn memmove_preserves_overlaps_across_copy_chunks() -> Result<()> {

@@ -23,7 +23,7 @@ pub fn register_stdlib_svc_handler(core: &mut ArmCore, system: &System) -> Resul
             x if x == StdlibSvcId::Strncpy as u32 => EmulatedFunction::call(&strncpy, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strcat as u32 => EmulatedFunction::call(&strcat, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strcmp as u32 => EmulatedFunction::call(&strcmp, core, &mut ()).await?.write(core, lr),
-            x if x == StdlibSvcId::Unk4 as u32 => EmulatedFunction::call(&unk4, core, &mut ()).await?.write(core, lr),
+            x if x == StdlibSvcId::Strncmp as u32 => EmulatedFunction::call(&stdlib::strncmp, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strchr as u32 => EmulatedFunction::call(&stdlib::strchr, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strstr as u32 => EmulatedFunction::call(&strstr, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strlen as u32 => EmulatedFunction::call(&stdlib::strlen, core, &mut ()).await?.write(core, lr),
@@ -166,12 +166,6 @@ async fn unk3(core: &mut ArmCore, _: &mut (), a0: u32) -> Result<()> {
     Ok(())
 }
 
-async fn unk4(_core: &mut ArmCore, _: &mut (), a0: u32, a1: u32, a2: u32, a3: u32) -> Result<()> {
-    tracing::warn!("unk4({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    Ok(())
-}
-
 async fn strstr(core: &mut ArmCore, _: &mut (), ptr_haystack: u32, ptr_needle: u32) -> Result<u32> {
     tracing::debug!("strstr({ptr_haystack:#x}, {ptr_needle:#x})");
 
@@ -198,6 +192,31 @@ mod tests {
     use wie_util::Result;
 
     use super::{rand, srand};
+
+    #[test]
+    fn bounded_compare_import_returns_guest_result() -> Result<()> {
+        futures::executor::block_on(async {
+            use wie_util::ByteWrite;
+            let mut core = ArmCore::new(false, None)?;
+            core.map(0x10000, 0x1000)?;
+            let mut state = core.save_context();
+            state.sp = 0x10f00;
+            core.restore_context(&state);
+            let system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+            super::register_stdlib_svc_handler(&mut core, &system)?;
+            let stub = core.make_svc_stub(crate::runtime::SVC_CATEGORY_STDLIB, 0x40au32)?;
+            core.write_bytes(0x10000, b"pack\0left")?;
+            core.write_bytes(0x10100, b"pack\0right")?;
+            let equal: u32 = core.run_function(stub, &[0x10000, 0x10100, 64]).await?;
+            assert_eq!(equal, 0);
+            core.write_bytes(0x10100, b"q")?;
+            let less: u32 = core.run_function(stub, &[0x10000, 0x10100, 64]).await?;
+            assert!((less as i32) < 0);
+            let greater: u32 = core.run_function(stub, &[0x10100, 0x10000, 64]).await?;
+            assert!((greater as i32) > 0);
+            Ok(())
+        })
+    }
 
     #[test]
     fn random_state_is_shared_by_system_clones_and_process_local() -> Result<()> {
