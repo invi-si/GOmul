@@ -133,6 +133,7 @@ async fn handle_wipic_svc(core: &mut ArmCore, (system, jvm): &mut (System, Jvm),
         WIPICSvcId::Connect => net::connect.into_body(),
         WIPICSvcId::Close => net::close.into_body(),
         WIPICSvcId::HostToNetworkShort => host_to_network_short.into_body(),
+        WIPICSvcId::SocketWrite => net::socket_write.into_body(),
         WIPICSvcId::SocketClose => net::socket_close.into_body(),
         WIPICSvcId::ClipCreate => media::clip_create.into_body(),
         WIPICSvcId::ClipFree => media::clip_free.into_body(),
@@ -545,6 +546,11 @@ mod tests {
             assert_eq!(core.run_function::<u32>(modes, &[]).await?, table);
             assert_eq!(core.run_function::<u32>(get, &[]).await?, 1);
             assert_eq!(core.run_function::<u32>(storage, &[]).await?, 1024 * 1024);
+            // Offline writes return an error without dereferencing guest buffers.
+            let socket_write = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x25cu32)?;
+            for args in [[0, 0, 1], [u32::MAX, 0xfffffff0, 64], [7, 0, 0]] {
+                assert_eq!(core.run_function::<u32>(socket_write, &args).await? as i32, -1);
+            }
             let htons = core.make_svc_stub(SVC_CATEGORY_WIPIC, 0x385u32)?;
             for (input, expected) in [(0, 0), (0x3b1d, 0x1d3b), (0xffff0001, 0x100)] {
                 assert_eq!(core.run_function::<u32>(htons, &[input]).await?, expected);

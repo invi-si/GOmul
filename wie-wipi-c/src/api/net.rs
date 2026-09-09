@@ -42,3 +42,10 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
 
     Ok(-1) // M_E_ERROR
 }
+
+/// The offline backend never establishes sockets; writes fail synchronously.
+/// Do not report bytes sent or dereference a buffer for a disconnected socket.
+pub async fn socket_write(_context: &mut dyn WIPICContext, fd: i32, _buffer: WIPICWord, length: i32) -> Result<i32> {
+    tracing::debug!("MC_netSocketWrite({fd}, length={length}) -> M_E_ERROR (offline)");
+    Ok(-1)
+}
