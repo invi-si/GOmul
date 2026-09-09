@@ -488,6 +488,31 @@ fn read_member_name_and_descriptor(core: &ArmCore, table: u32, index: u16) -> Re
     Ok((name, descriptor))
 }
 
+// Generated field-import tables reserve a second, empty entry for J/D fields.
+// Only that precise padding shape is allowed; malformed null names still fault.
+fn read_field_member(core: &ArmCore, table: u32, index: u16) -> Result<Option<(String, String)>> {
+    let entry: [u32; 2] = read_generic(core, table + u32::from(index) * 8)?;
+    if entry == [0, 0] && index > 0 {
+        let (_, previous_descriptor) = read_member_name_and_descriptor(core, table, index - 1)?;
+        if previous_descriptor == "J" || previous_descriptor == "D" {
+            return Ok(None);
+        }
+    }
+    read_member_name_and_descriptor(core, table, index).map(Some)
+}
+
+fn link_field_word(core: &mut ArmCore, jvm: &Jvm, class_name: &str, imports: u32, outputs: u32, index: u16, is_static: bool) -> Result<()> {
+    let word_index = match read_field_member(core, imports, index)? {
+        Some((name, descriptor)) => LgtJvmSupport::field_word_index(jvm, class_name, &name, &descriptor, is_static)?,
+        // Generated stores load both indices separately, including the upper
+        // word of a long/double. Leaving this output at zero corrupts field 0.
+        None => read_generic::<u16, _>(core, outputs + (u32::from(index) - 1) * 2)?
+            .checked_add(1)
+            .ok_or_else(|| WieError::FatalError("LGT wide field index overflow".into()))?,
+    };
+    write_generic(core, outputs + u32::from(index) * 2, word_index)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn link_class_members(
     core: &mut ArmCore,
@@ -506,15 +531,10 @@ async fn link_class_members(
     non_virtual_method_targets: u32,
 ) -> Result<()> {
     for index in link.instance_field_offset..link.instance_field_offset + link.instance_field_count {
-        let (name, descriptor) = read_member_name_and_descriptor(core, instance_field_imports, index)?;
-        let word_index = LgtJvmSupport::field_word_index(jvm, class_name, &name, &descriptor, false)?;
-        write_generic(core, instance_field_word_indices + index as u32 * size_of::<u16>() as u32, word_index)?;
+        link_field_word(core, jvm, class_name, instance_field_imports, instance_field_word_indices, index, false)?;
     }
-
     for index in link.static_field_offset..link.static_field_offset + link.static_field_count {
-        let (name, descriptor) = read_member_name_and_descriptor(core, static_field_imports, index)?;
-        let word_index = LgtJvmSupport::field_word_index(jvm, class_name, &name, &descriptor, true)?;
-        write_generic(core, static_field_word_indices + index as u32 * size_of::<u16>() as u32, word_index)?;
+        link_field_word(core, jvm, class_name, static_field_imports, static_field_word_indices, index, true)?;
     }
 
     for index in link.virtual_method_offset..link.virtual_method_offset + link.virtual_method_count {
@@ -734,6 +754,29 @@ mod tests {
     use super::{LgtJvmSupport, java_link_imported_classes};
 
     #[test]
+    fn wide_field_padding_is_not_a_member() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        Allocator::init(&mut core)?;
+        let table = Allocator::alloc(&mut core, 32)?;
+        let name = Allocator::alloc(&mut core, 8)?;
+        let descriptor = Allocator::alloc(&mut core, 4)?;
+        write_null_terminated_string_bytes(&mut core, name, b"value")?;
+        for kind in [b"J", b"D"] {
+            write_null_terminated_string_bytes(&mut core, descriptor, kind)?;
+            write_generic(&mut core, table, [name, descriptor, 0u32, 0, name, descriptor, 0, 0])?;
+            assert_eq!(super::read_field_member(&core, table, 0)?.unwrap().0, "value");
+            assert!(super::read_field_member(&core, table, 1)?.is_none());
+            assert_eq!(super::read_field_member(&core, table, 2)?.unwrap().0, "value");
+            assert!(super::read_field_member(&core, table, 3)?.is_none());
+        }
+        write_null_terminated_string_bytes(&mut core, descriptor, b"I")?;
+        assert!(super::read_field_member(&core, table, 1).is_err());
+        write_generic(&mut core, table, [0u32, 0])?;
+        assert!(super::read_field_member(&core, table, 0).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_imported_member_link_outputs() -> Result<()> {
         let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
         let done = Arc::new(AtomicBool::new(false));
@@ -748,6 +791,31 @@ mod tests {
             context.sp = stack + 0x100;
             core.restore_context(&context);
             let mut jvm = LgtJvmSupport::init(&mut core, &system_clone, None).await?;
+            jvm.resolve_class("java/util/Calendar").await.unwrap();
+            let mut wide_strings = Vec::new();
+            for value in ["time", "J", "lenient", "Z"] {
+                let address = Allocator::alloc(&mut core, (value.len() + 1) as u32)?;
+                write_null_terminated_string_bytes(&mut core, address, value.as_bytes())?;
+                wide_strings.push(address);
+            }
+            let wide_imports = Allocator::alloc(&mut core, 24)?;
+            write_generic(
+                &mut core,
+                wide_imports,
+                [wide_strings[0], wide_strings[1], 0u32, 0, wide_strings[2], wide_strings[3]],
+            )?;
+            let wide_outputs = Allocator::alloc(&mut core, 8)?;
+            write_generic(&mut core, wide_outputs, [0xffffu16; 4])?;
+            for index in 0..3 {
+                super::link_field_word(&mut core, &jvm, "java/util/Calendar", wide_imports, wide_outputs, index, false)?;
+            }
+            let time_index = LgtJvmSupport::field_word_index(&jvm, "java/util/Calendar", "time", "J", false)?;
+            let lenient_index = LgtJvmSupport::field_word_index(&jvm, "java/util/Calendar", "lenient", "Z", false)?;
+            assert_eq!(
+                read_generic::<[u16; 4], _>(&core, wide_outputs)?,
+                [time_index, time_index + 1, lenient_index, 0xffff]
+            );
+
             let class_name = "org/kwis/msp/lcdui/Font";
             jvm.resolve_class(class_name).await.unwrap();
 

@@ -221,6 +221,46 @@ mod tests {
     }
 
     #[test]
+    fn calendar_get_compiler_slot_dispatches_on_subclass() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let system_clone = system.clone();
+        system.spawn(async move || {
+            let mut core = ArmCore::new(false, None)?;
+            Allocator::init(&mut core)?;
+            let mut context = core.save_context();
+            context.sp = Allocator::alloc(&mut core, 0x100)? + 0x100;
+            core.restore_context(&context);
+            let jvm = LgtJvmSupport::init(&mut core, &system_clone, None).await?;
+            register_init_svc_handler(&mut core, 0)?;
+            register_java_system_svc_handler(&mut core, &jvm, 0)?;
+            let calendar = jvm.new_class("java/util/GregorianCalendar", "()V", ()).await.unwrap();
+            let _: () = jvm
+                .invoke_virtual(&calendar, "java/util/Calendar", "setTimeInMillis", "(J)V", (0i64,))
+                .await
+                .unwrap();
+            let pointer = LgtJvmSupport::class_instance_raw(&*calendar);
+            let dispatch: u32 = read_generic(&core, pointer)?;
+            let target: u32 = read_generic(&core, dispatch + 20 * 4)?;
+            for field in [1i32, 2, 5, 11] {
+                let expected: i32 = jvm
+                    .invoke_virtual(&calendar, "java/util/Calendar", "get", "(I)I", (field,))
+                    .await
+                    .unwrap();
+                let actual: u32 = core.run_function(target, &[pointer, field as u32]).await?;
+                assert_eq!(actual as i32, expected);
+            }
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        while !done.load(Ordering::Relaxed) {
+            system.tick()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn compiler_array_helpers_build_guest_arrays() -> Result<()> {
         let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
         let done = Arc::new(AtomicBool::new(false));

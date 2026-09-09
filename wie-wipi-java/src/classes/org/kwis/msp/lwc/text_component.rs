@@ -23,6 +23,8 @@ impl TextComponent {
                 JavaMethodProto::new("getString", "()Ljava/lang/String;", Self::get_string, MethodAccessFlags::PUBLIC),
             ],
             fields: vec![
+                JavaFieldProto::new("text", "Ljava/lang/String;", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("constraint", "I", FieldAccessFlags::PROTECTED),
                 JavaFieldProto::new("m_cPos", "I", FieldAccessFlags::PROTECTED),
                 JavaFieldProto::new("imHandler", "Lorg/kwis/msp/lcdui/InputMethodHandler;", FieldAccessFlags::PROTECTED),
             ],
@@ -50,17 +52,26 @@ impl TextComponent {
         Ok(())
     }
 
-    async fn set_string(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<TextComponent>, data: ClassInstanceRef<String>) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lwc.TextComponent::setString({this:?}, {data:?})");
-
-        Ok(())
+    async fn set_string(
+        jvm: &Jvm,
+        _: &mut WieJvmContext,
+        mut this: ClassInstanceRef<TextComponent>,
+        data: ClassInstanceRef<String>,
+    ) -> JvmResult<()> {
+        let data = if data.is_null() {
+            JavaLangString::from_rust_string(jvm, "").await?.into()
+        } else {
+            data
+        };
+        jvm.put_field(&mut this, "text", "Ljava/lang/String;", data).await
     }
 
     async fn get_string(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<TextComponent>) -> JvmResult<ClassInstanceRef<String>> {
-        tracing::warn!("stub org.kwis.msp.lwc.TextComponent::<init>({this:?})");
-
-        let result = JavaLangString::from_rust_string(jvm, "temp").await?;
-
-        Ok(result.into())
+        let data: ClassInstanceRef<String> = jvm.get_field(&this, "text", "Ljava/lang/String;").await?;
+        if data.is_null() {
+            Ok(JavaLangString::from_rust_string(jvm, "").await?.into())
+        } else {
+            Ok(data)
+        }
     }
 }

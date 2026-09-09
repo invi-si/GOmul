@@ -114,3 +114,9 @@ vtable = [
     { name = "keyNotify", descriptor = "(II)Z", index = 25 },
     { name = "paint", descriptor = "(Lorg/kwis/msp/lcdui/Graphics;)V", index = 27 },
 ]
+
+[[class]]
+name = "java/util/Calendar"
+vtable = [
+    { name = "get", descriptor = "(I)I", index = 19 },
+]
