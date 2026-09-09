@@ -7,7 +7,7 @@ use wipi_types::{
     wipic::{WIPICDisplayInfo, WIPICFramebuffer, WIPICIndirectPtr, WIPICWord},
 };
 
-use wie_backend::canvas::{ArgbPixel, Clip, Color, Image, PixelType, VecImageBuffer};
+use wie_backend::canvas::{ArgbPixel, Clip, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer};
 use wie_core_arm::{Allocator, ArmCore};
 use wie_util::{Result, WieError, read_generic, write_generic};
 use wie_wipi_c::{
@@ -952,6 +952,18 @@ pub async fn get_display_info(context: &mut dyn WIPICContext, kind: WIPICWord, o
     Ok(1)
 }
 
+fn opaque_native_image(image: &dyn Image) -> Option<VecImageBuffer<Rgb565Pixel>> {
+    let colors = image.colors();
+    if colors.iter().any(|color| color.a != 255) {
+        return None;
+    }
+    Some(VecImageBuffer::from_raw(
+        image.width(),
+        image.height(),
+        colors.into_iter().map(Rgb565Pixel::from_color).collect(),
+    ))
+}
+
 pub async fn create_image(
     context: &mut dyn WIPICContext,
     output: WIPICWord,
@@ -959,7 +971,17 @@ pub async fn create_image(
     offset: WIPICWord,
     length: WIPICWord,
 ) -> Result<WIPICWord> {
-    let backing = decode_image_framebuffer(context, encoded_data, offset, length)?;
+    let mut backing = decode_image_framebuffer(context, encoded_data, offset, length)?;
+    // Native LGT code reads opaque image pointers in the display's RGB565
+    // format. Keep alpha-bearing images in ARGB for the existing blend path.
+    if backing.0.bpp != FRAMEBUFFER_DEPTH {
+        let image = backing.image(context)?;
+        if let Some(native) = opaque_native_image(&*image) {
+            let converted = FrameBuffer::from_image(context, &native)?;
+            context.free(backing.0.buf)?;
+            backing = converted;
+        }
+    }
     let width = backing.0.width;
     let height = backing.0.height;
     let ptr_backing = alloc_record(context, backing.0)?;
@@ -1010,6 +1032,23 @@ mod tests {
         application_y, init_process_state, normalize_context, presentation_image, set_display_property, with_presentation,
     };
     use wie_backend::canvas::{ArgbPixel, Image, PixelType, Rgb565Pixel, VecImageBuffer};
+
+    #[test]
+    fn opaque_images_use_native_rgb565_with_tightly_packed_rows() {
+        let image = VecImageBuffer::<ArgbPixel>::from_raw(3, 2, vec![0xff002040, 0xff209020, 0xff000000, 0xffff0000, 0xff00ff00, 0xff0000ff]);
+        let native = super::opaque_native_image(&image).unwrap();
+        assert_eq!(native.bytes_per_pixel(), 2);
+        assert_eq!((native.width(), native.height()), (3, 2));
+        assert_eq!(&*native.raw(), &[0x08, 0x01, 0x84, 0x24, 0, 0, 0, 0xf8, 0xe0, 0x07, 0x1f, 0]);
+    }
+
+    #[test]
+    fn transparent_and_partial_alpha_images_keep_argb() {
+        for alpha in [0, 127, 254] {
+            let image = VecImageBuffer::<ArgbPixel>::from_raw(2, 1, vec![0xff123456, (alpha << 24) | 0x123456]);
+            assert!(super::opaque_native_image(&image).is_none());
+        }
+    }
 
     #[test]
     fn process_state_initializes_once_for_the_clet_lifecycle() -> Result<()> {

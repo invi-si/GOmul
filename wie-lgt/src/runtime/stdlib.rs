@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn bounded_compare_import_returns_guest_result() -> Result<()> {
-        futures::executor::block_on(async {
+        async {
             use wie_util::ByteWrite;
             let mut core = ArmCore::new(false, None)?;
             core.map(0x10000, 0x1000)?;
@@ -215,7 +215,9 @@ mod tests {
             let greater: u32 = core.run_function(stub, &[0x10100, 0x10000, 64]).await?;
             assert!((greater as i32) > 0);
             Ok(())
-        })
+        }
+        .now_or_never()
+        .expect("synchronous stdlib calls complete immediately")
     }
 
     #[test]
