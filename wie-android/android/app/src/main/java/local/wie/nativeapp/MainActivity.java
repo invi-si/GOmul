@@ -26,6 +26,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  private final Set<String> held=new HashSet<>();
  private LinearLayout root;private TextView status;private GameView gameView;private AudioOutput audio;
  private File dataImportGame;
+ private File rescueExport;private boolean rescueShown=false;private long rescueSessionStart=0;
  private File activeGame;private boolean foreground=false,starting=false;private final int[] pixels=new int[1024*1024];
  private long lastReport=0,lastPaints=0;
  private boolean tracing=false;
@@ -116,6 +117,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   ScrollView scroll=new ScrollView(this);scroll.setClipToPadding(false);LinearLayout list=column();scroll.addView(list);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
   File[] folders=games().listFiles();if(folders!=null){Arrays.sort(folders);for(File folder:folders){File[] files=folder.listFiles((d,name)->name.toLowerCase(Locale.ROOT).endsWith(".jar")||name.toLowerCase(Locale.ROOT).endsWith(".zip"));if(files!=null)for(File game:files){Button item=button("▶   "+game.getName(),()->launch(game));item.setOnLongClickListener(v->{chooseData(game);return true;});item.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);item.setTextColor(0xff25292e);addSpaced(list,item,72);}}}
   if(list.getChildCount()==0){TextView empty=label("Your library is ready.\nImport your first game to start playing.",17);empty.setPadding(dp(8),dp(36),dp(8),dp(24));empty.setTextColor(0xff4d535b);list.addView(empty);}
+  File lastRescue=RescueReports.latest(getFilesDir(),null);if(lastRescue!=null)addSpaced(root,button("Export last rescue",()->exportRescue(lastRescue)),44);
   addSpaced(root,button("Open-source licences",()->{try(InputStream in=getAssets().open("LICENSES.txt")){new AlertDialog.Builder(this).setTitle("Licences").setMessage(new String(readBytes(in),java.nio.charset.StandardCharsets.UTF_8)).setPositiveButton("Close",null).show();}catch(IOException e){error(e);}}),48);
  }
  private File saveFolder(File game){return new File(getFilesDir(),"saves/"+game.getParentFile().getName());}
@@ -166,7 +168,9 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   finishDataImport(game,plan,false);
  }
  @Override protected void onActivityResult(int request,int result,Intent data){
-  super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null||request<1||request>3)return;Uri uri=data.getData();if(uri==null)return;
+  super.onActivityResult(request,result,data);
+  if(request==4){if(result==RESULT_OK&&data!=null&&data.getData()!=null&&rescueExport!=null){File report=rescueExport;Uri destination=data.getData();io.execute(()->{try{OutputStream out=getContentResolver().openOutputStream(destination);if(out==null)throw new IOException("Cannot create rescue export");RescueReports.export(report,out);runOnUiThread(()->Toast.makeText(this,"Rescue report exported",Toast.LENGTH_LONG).show());}catch(Exception e){runOnUiThread(()->error(e));}});}return;}
+  if(result!=RESULT_OK||data==null||request<1||request>3)return;Uri uri=data.getData();if(uri==null)return;
   File selected=dataImportGame;starting=true;Toast.makeText(this,"Reading imported files…",Toast.LENGTH_SHORT).show();
   io.execute(()->{try{
    File game;GameDataImport.Plan plan;
@@ -205,7 +209,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    runOnUiThread(()->{starting=false;if(pending==null)launchPrepared(file);else finishDataImport(file,pending,save.exists());});
   }catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
  }
- private void launchPrepared(File file){if(starting)return;starting=true;activeGame=file;showGame();status.setText("Loading…");audio.stopAll();io.execute(()->{try{
+ private void launchPrepared(File file){if(starting)return;starting=true;activeGame=file;rescueShown=false;rescueSessionStart=System.currentTimeMillis();showGame();status.setText("Loading…");audio.stopAll();io.execute(()->{try{
    java.nio.file.Files.write(new File(getFilesDir(),"active-game.txt").toPath(),file.getParentFile().getName().getBytes(java.nio.charset.StandardCharsets.UTF_8));
    if(new File(getFilesDir(),"mac-checkpoints.json").isFile()){
     String requestId=UUID.randomUUID().toString();
@@ -339,8 +343,18 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);releaseKeys();if(activeGame!=null){Bitmap old=gameView==null?null:gameView.bitmap;showGame();gameView.bitmap=old;}else showLibrary();}
  @Override public void doFrame(long nanos){if(!foreground)return;if(tracing)NativeBridge.tracePoint(20,nanos,System.nanoTime());if(activeGame!=null&&!starting&&!checkpointBusy){long shape=NativeBridge.frame(pixels,frameMetadata);if(shape!=0){int w=(int)(shape>>>32),h=(int)shape;if(gameView.bitmap==null||gameView.bitmap.getWidth()!=w||gameView.bitmap.getHeight()!=h)gameView.bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);if(tracing)NativeBridge.tracePoint(31,frameMetadata[0],0);gameView.bitmap.setPixels(pixels,0,w,0,0,w,h);gameView.paintId=frameMetadata[0];if(tracing)NativeBridge.tracePoint(21,gameView.paintId,0);gameView.invalidate();}
    for(int i=0;i<8;i++){byte[] packet=NativeBridge.audio();if(packet==null)break;audio.submit(packet);}
-   long now=SystemClock.elapsedRealtime();if(now-lastReport>=1000){String current=NativeBridge.status();status.setText(current.equals("Running")?activeGame.getName():current);long paints=NativeBridge.paints();if(lastReport!=0)Log.i("WIE-Native","frames="+(paints-lastPaints)+" elapsedMs="+(now-lastReport)+" state="+current);lastReport=now;lastPaints=paints;}}
+   long now=SystemClock.elapsedRealtime();if(now-lastReport>=1000){String current=NativeBridge.status();if(current.startsWith("Error:")&&!rescueShown){rescueShown=true;showRescue(current);}status.setText(current.equals("Running")?activeGame.getName():current);long paints=NativeBridge.paints();if(lastReport!=0)Log.i("WIE-Native","frames="+(paints-lastPaints)+" elapsedMs="+(now-lastReport)+" state="+current);lastReport=now;lastPaints=paints;}}
   Choreographer.getInstance().postFrameCallback(this);
+ }
+ private void exportRescue(File report){
+  rescueExport=report;Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/zip");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"GOmul-rescue-"+System.currentTimeMillis()+".zip");startActivityForResult(intent,4);
+ }
+ private void showRescue(String failure){
+  File report=activeGame==null?null:RescueReports.latest(getFilesDir(),activeGame.getParentFile().getName());
+  if(report!=null&&report.lastModified()<rescueSessionStart)report=null;
+  AlertDialog.Builder dialog=new AlertDialog.Builder(this).setTitle("Game stopped — Rescue").setMessage(failure+"\n\n"+(report==null?"No rescue report was captured for this failure.":"A rescue report was saved locally. It contains the screenshot, replay and private save data. Share it privately with the developer."));
+  if(report!=null){File ready=report;dialog.setPositiveButton("Export rescue",(d,w)->exportRescue(ready));}
+  dialog.setNegativeButton("Return to library",(d,w)->leaveGame()).setNeutralButton("Stay here",null).show();
  }
  private void error(Exception e){Log.e("WIE-Native","Operation failed",e);new AlertDialog.Builder(this).setTitle("Unable to open game").setMessage(e.getMessage()).setPositiveButton("OK",null).show();}
  private class GameView extends View {Bitmap bitmap;long paintId;final Paint paint=new Paint();final RectF destination=new RectF();GameView(){super(MainActivity.this);setBackgroundColor(Color.BLACK);paint.setFilterBitmap(false);}protected void onDraw(Canvas canvas){super.onDraw(canvas);if(bitmap==null)return;float scale=Math.min(getWidth()/(float)bitmap.getWidth(),getHeight()/(float)bitmap.getHeight());float w=bitmap.getWidth()*scale,h=bitmap.getHeight()*scale;destination.set((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2);long drawId=++nextDraw,drawPaint=paintId;boolean capture=tracing;

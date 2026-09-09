@@ -52,8 +52,25 @@ pub struct Tape {
     clock_record: Option<usize>,
     pub error: Option<String>,
     offset: i128,
+    safe_end: usize,
+    safe_clock: Option<(usize, [u8; 4])>,
 }
 impl Tape {
+    /// Keep a tiny bookmark; clock run-length compression can still extend the
+    /// last record, so retain its count as it was at the successful boundary.
+    pub fn mark_safe(&mut self) {
+        if self.error.is_none() && self.cursor.is_none() {
+            self.safe_end = self.bytes.len();
+            self.safe_clock = self.clock_record.map(|pos| (pos + 9, self.bytes[pos + 9..pos + 13].try_into().unwrap()));
+        }
+    }
+    pub fn safe_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.bytes[..self.safe_end].to_vec();
+        if let Some((pos, count)) = self.safe_clock {
+            bytes[pos..pos + 4].copy_from_slice(&count);
+        }
+        bytes
+    }
     pub fn replay(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
@@ -388,5 +405,41 @@ impl Slots {
         // Renaming is the commit point. Cleanup failure must never roll back a partial tree.
         let _ = fs::remove_dir_all(committed);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rescue_boundary_tests {
+    use super::*;
+    #[test]
+    fn safe_prefix_survives_clock_compression_and_failed_tick() {
+        let mut tape = Tape::default();
+        tape.bytes.push(1);
+        tape.bytes.extend(42u64.to_le_bytes());
+        tape.bytes.extend(1u32.to_le_bytes());
+        tape.clock_record = Some(0);
+        tape.mark_safe();
+        let before = tape.bytes.clone();
+        // The next clock read may increment this already-present record.
+        tape.bytes[9..13].copy_from_slice(&2u32.to_le_bytes());
+        tape.tick();
+        assert_eq!(tape.safe_bytes(), before);
+        assert_eq!(u32::from_le_bytes(tape.bytes[9..13].try_into().unwrap()), 2);
+        tape.error = Some("recording exhausted".into());
+        tape.mark_safe();
+        assert_eq!(tape.safe_bytes(), before);
+    }
+    #[test]
+    fn recording_and_replay_are_unchanged_by_boundary_bookmarks() {
+        let mut tape = Tape::default();
+        tape.event(&Event::Keydown(KeyCode::OK));
+        tape.tick();
+        let bytes = tape.bytes.clone();
+        tape.mark_safe();
+        assert_eq!(tape.bytes, bytes);
+        let mut replay = Tape::replay(tape.safe_bytes());
+        assert!(matches!(replay.next().unwrap(), Step::Event(Event::Keydown(KeyCode::OK))));
+        assert!(matches!(replay.next().unwrap(), Step::Tick));
+        assert!(replay.done());
     }
 }

@@ -6,6 +6,7 @@ android {
     defaultConfig {
         applicationId traceBuild ? 'local.wie.nativeapp.trace' : 'local.wie.nativeapp'
         manifestPlaceholders = [appLabel: traceBuild ? 'GOmul Trace' : 'GOmul', shellProfileable: traceBuild ? 'true' : 'false']
+        testInstrumentationRunner "local.wie.nativeapp.RescueInstrumentation"
         minSdk 26
         targetSdk 36
         versionCode 7

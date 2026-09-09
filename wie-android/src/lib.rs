@@ -11,6 +11,7 @@ mod audio;
 mod checkpoint;
 #[cfg(all(feature = "input-trace", target_os = "android"))]
 mod input_trace;
+mod rescue;
 #[cfg(any(test, all(feature = "input-trace", target_os = "android")))]
 mod trace_aggregate;
 use wie_util::input_trace as trace;
@@ -201,7 +202,13 @@ fn stop() {
         let _ = old.thread.join();
     }
 }
-fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -> anyhow::Result<()> {
+fn run(
+    path: String,
+    save: String,
+    shared: Arc<Shared>,
+    rx: Receiver<Command>,
+    rescue_state: &mut Option<(rescue::Rescue, checkpoint::Slots)>,
+) -> anyhow::Result<()> {
     #[cfg(feature = "frame-diagnostics")]
     let _frame_trace = {
         std::fs::create_dir_all(&save)?;
@@ -218,6 +225,14 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
     let mut slots = checkpoint::Slots::new(&save)?;
     let archive_id = Sha256::digest(std::fs::read(&path)?).to_vec();
     let mut tape = Arc::new(Mutex::new(checkpoint::Tape::default()));
+    *rescue_state = Some((
+        rescue::Rescue::new(&slots, tape.clone(), &archive_id),
+        checkpoint::Slots {
+            root: slots.root.clone(),
+            save: slots.save.clone(),
+            initial: Default::default(),
+        },
+    ));
     let mut emulator = create_emulator(&path, &save, shared.clone(), tape.clone())?;
     *shared.status.lock().unwrap() = "Running".into();
     let mut held = HashMap::new();
@@ -255,6 +270,7 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
                         emulator = restored.0;
                         tape = restored.1;
                         slots.initial = restored.2;
+                        rescue_state.as_mut().unwrap().0.reset(&slots, tape.clone());
                         halted = false;
                         Ok(if action == "load" && !recovery {
                             "Quick Load complete. No undo was created for the stopped/expired session."
@@ -327,9 +343,12 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
         };
         if let Err(error) = tick_result {
             halted = true;
-            *shared.status.lock().unwrap() = format!("Error: {error}. Quick Load available.");
+            let message = format!("Error: {error}. Quick Load available.");
+            capture_rescue(rescue_state, &shared, &message);
+            *shared.status.lock().unwrap() = message;
             continue;
         }
+        tape.lock().unwrap().mark_safe();
         #[cfg(feature = "cpu-replay")]
         cpu_capture.poll();
         if shared.exiting.load(std::sync::atomic::Ordering::Relaxed) {
@@ -338,6 +357,15 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
         }
     }
 }
+fn capture_rescue(state: &mut Option<(rescue::Rescue, checkpoint::Slots)>, shared: &Arc<Shared>, message: &str) {
+    if let Some((rescue, slots)) = state {
+        let frame = frame_bytes(&shared.frame.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Err(error) = rescue.capture(message, &frame, slots) {
+            log::warn!("Rescue capture failed: {error}");
+        }
+    }
+}
+
 fn create_emulator(
     path: &str,
     save: &str,
@@ -470,12 +498,25 @@ pub extern "system" fn Java_local_wie_nativeapp_NativeBridge_start(mut env: JNIE
         let (tx, rx) = mpsc::channel();
         let worker = state.clone();
         let thread = thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(path, save, worker.clone(), rx)));
-            *worker.status.lock().unwrap() = match result {
+            let mut rescue_state = None;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(path, save, worker.clone(), rx, &mut rescue_state)));
+            let failed = !matches!(&result, Ok(Ok(())));
+            let message = match result {
                 Ok(Ok(())) => "Stopped".into(),
                 Ok(Err(e)) => format!("Error: {e}"),
-                Err(_) => "Error: emulator stopped unexpectedly".into(),
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    format!("Error: emulator stopped unexpectedly: {message}")
+                }
             };
+            if failed && !worker.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                capture_rescue(&mut rescue_state, &worker, &message);
+            }
+            *worker.status.lock().unwrap_or_else(|e| e.into_inner()) = message;
         });
         *session().lock().unwrap() = Some(Session { shared: state, tx, thread });
         Ok(())
