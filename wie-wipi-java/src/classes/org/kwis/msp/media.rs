@@ -6,3 +6,6 @@ mod vibrator;
 mod volume;
 
 pub use self::{base_clip::BaseClip, clip::Clip, play_listener::PlayListener, player::Player, vibrator::Vibrator, volume::Volume};
+
+mod media_unsupported_exception;
+pub use media_unsupported_exception::MediaUnsupportedException;

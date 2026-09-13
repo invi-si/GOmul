@@ -12,9 +12,33 @@ final class GameDataImport {
  static final int MAX_DATA=16*1024*1024;
  static final class Plan {
   final String pid; final Map<String,byte[]> files; final String phone;
-  Plan(String pid,Map<String,byte[]> files,String phone){this.pid=pid;this.files=files;this.phone=phone;}
+  Plan(String pid,Map<String,byte[]> files,String phone){
+   this.pid=pid;this.files=files;
+   // Super Action Hero 3 companion data uses this emulated identity.
+   // Explicit bundle identities still take precedence for alternate data sets.
+   this.phone=phone==null&&"PD121120".equals(pid)?"01055145031":phone;
+  }
  }
  static boolean dataName(String name){return name.matches("savedata|locdata|ranker|it[0-9]+|mk[0-9]+");}
+ // Installation metadata for the verified Inotia companion bundle, not a guest API override.
+ // Match the actual supplied preferences so alternate bundles retain their own identity.
+ static void prepareBundledIdentity(File game,File save)throws IOException {
+  if(new File(save,"phone-number.txt").exists()||hasProgress(save))return;
+  if(!isInotiaCompanionBundle(game))return;
+  if(!save.isDirectory()&&!save.mkdirs())throw new IOException("Cannot create save storage.");
+  Files.write(new File(save,"phone-number.txt").toPath(),"01012349876\n".getBytes(StandardCharsets.UTF_8),StandardOpenOption.CREATE_NEW);
+ }
+ static boolean isInotiaCompanionBundle(File game)throws IOException {
+  try(ZipFile archive=zip(game)){
+   ZipEntry entry=archive.getEntry("P/prefs");if(entry==null||entry.getSize()!=64)return false;
+   byte[] bytes;try(InputStream in=archive.getInputStream(entry)){bytes=read(in,64);}
+   byte[] digest;
+   try{digest=java.security.MessageDigest.getInstance("SHA-256").digest(bytes);}
+   catch(java.security.NoSuchAlgorithmException e){throw new IOException(e);}
+   StringBuilder hash=new StringBuilder();for(byte b:digest)hash.append(String.format(Locale.ROOT,"%02x",b&255));
+   return hash.toString().equals("2a702cdf2db4b96f44516872ba97b674f6b6d5f53f1f6a9598a4be57ba075fcb");
+  }
+ }
  static void safeName(String name)throws IOException {
   if(name.startsWith("/")||name.contains("\\")||Arrays.asList(name.split("/")).contains(".."))throw new IOException("Unsafe archive path.");
  }
@@ -34,10 +58,16 @@ final class GameDataImport {
  }
  static void normalize(File game)throws IOException {
   try(ZipFile archive=zip(game)){
-   String infoName=null;Enumeration<? extends ZipEntry> entries=archive.entries();
-   while(entries.hasMoreElements()){ZipEntry entry=entries.nextElement();safeName(entry.getName());if(entry.getName().equals("app_info")||entry.getName().endsWith("/app_info")){if(infoName!=null)throw new IOException("Choose a package containing one game.");infoName=entry.getName();}}
-   if(infoName==null||infoName.equals("app_info"))return;
-   String prefix=infoName.substring(0,infoName.length()-"app_info".length());File temp=File.createTempFile("normalize-",".tmp",game.getParentFile());
+   Set<String> roots=new HashSet<>();Enumeration<? extends ZipEntry> entries=archive.entries();
+   while(entries.hasMoreElements()){
+    ZipEntry entry=entries.nextElement();String name=entry.getName();safeName(name);if(entry.isDirectory())continue;
+    int slash=name.lastIndexOf('/');String leaf=name.substring(slash+1);
+    if(leaf.equals("app_info")||leaf.equals("__adf__"))roots.add(name.substring(0,slash+1));
+   }
+   if(roots.size()>1)throw new IOException("Choose a package containing one game.");
+   if(roots.isEmpty())return;
+   String prefix=roots.iterator().next();if(prefix.isEmpty())return;
+   File temp=File.createTempFile("normalize-",".tmp",game.getParentFile());
    try{
     try(ZipOutputStream output=new ZipOutputStream(new FileOutputStream(temp))){
      entries=archive.entries();long total=0;Set<String> names=new HashSet<>();
@@ -68,6 +98,23 @@ final class GameDataImport {
    }
   }
   return files.isEmpty()?null:new Plan(application,files,phone);
+ }
+ // Launch-time setup must not replace progress from an older app without an import marker.
+ static boolean hasProgress(File save)throws IOException {
+  if(!save.exists())return false;
+  File[] children=save.listFiles();if(children==null)throw new IOException("Cannot read game saves.");
+  for(File child:children){
+   if(child.getName().equals("phone-number.txt")||child.getName().equals("display-options"))continue;
+   if(containsData(child))return true;
+  }
+  return false;
+ }
+ private static boolean containsData(File file)throws IOException {
+  if(Files.isSymbolicLink(file.toPath()))throw new IOException("Unexpected link in game saves.");
+  if(file.isFile())return true;
+  File[] children=file.listFiles();if(children==null)throw new IOException("Cannot read game saves.");
+  for(File child:children)if(containsData(child))return true;
+  return false;
  }
  static void install(File save,Plan plan,String phone)throws IOException { install(save,plan,phone,false); }
  static void install(File save,Plan plan,String phone,boolean replace)throws IOException {

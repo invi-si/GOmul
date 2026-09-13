@@ -36,6 +36,8 @@ pub struct System {
     random_state: Arc<RwLock<u32>>,
     // Adapter root only; WIPI registration links and cancellation state live in guest memory.
     wipi_timer_head: Arc<RwLock<u32>>,
+    wipi_record_head: Arc<RwLock<u32>>,
+    wipi_stream_head: Arc<RwLock<u32>>,
 }
 
 impl System {
@@ -57,6 +59,8 @@ impl System {
             task_runner: Arc::new(task_runner),
             random_state: Arc::new(RwLock::new(1)),
             wipi_timer_head: Arc::new(RwLock::new(0)),
+            wipi_record_head: Arc::new(RwLock::new(0)),
+            wipi_stream_head: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -66,6 +70,30 @@ impl System {
 
     pub fn set_wipi_timer_head(&self, address: u32) {
         *self.wipi_timer_head.write() = address;
+    }
+
+    // Root reference only: open-record handles, names, sizes, and links are guest-backed.
+    pub fn wipi_record_head(&self) -> u32 {
+        *self.wipi_record_head.read()
+    }
+    pub fn set_wipi_record_head(&self, address: u32) {
+        *self.wipi_record_head.write() = address;
+    }
+
+    // Adapter root only; open stream links and names remain in guest memory.
+    pub fn wipi_stream_head(&self) -> u32 {
+        *self.wipi_stream_head.read()
+    }
+
+    pub fn set_wipi_stream_head(&self, address: u32) {
+        *self.wipi_stream_head.write() = address;
+    }
+
+    /// Break callback ownership cycles once the emulator is no longer running.
+    pub fn shutdown(&self) {
+        self.executor.shutdown();
+        let events = core::mem::replace(&mut *self.event_queue.write(), EventQueue::new());
+        drop(events);
     }
 
     pub fn tick(&mut self) -> Result<()> {

@@ -78,6 +78,18 @@ impl Executor {
         Self { inner }
     }
 
+    /// Called only after the owning emulator has stopped polling its tasks.
+    /// Futures can own Executor/System clones; release them outside the lock.
+    pub fn shutdown(&self) {
+        let tasks = {
+            let mut inner = self.inner.lock();
+            inner.sleeping_tasks.clear();
+            inner.current_task_id = None;
+            core::mem::take(&mut inner.tasks)
+        };
+        drop(tasks);
+    }
+
     pub fn spawn<C, R>(&self, callable: C) -> usize
     where
         C: AsyncCallable<R> + 'static,
@@ -128,6 +140,11 @@ impl Executor {
 
             {
                 let inner = self.inner.lock();
+                // No work can consume the remaining slice. In particular, a
+                // deterministic clock need not advance after its last task ends.
+                if inner.tasks.is_empty() {
+                    break;
+                }
                 let running_task_count = inner.tasks.len() - inner.sleeping_tasks.len();
                 if running_task_count == 0 && !inner.sleeping_tasks.is_empty() {
                     let next_wakeup = *inner.sleeping_tasks.values().min().unwrap();
@@ -256,6 +273,24 @@ mod tests {
     use super::Executor;
     use crate::time::Instant;
 
+    #[test]
+    fn shutdown_releases_tasks_that_own_the_executor() {
+        let executor = Executor::new();
+        let weak = Arc::downgrade(&executor.inner);
+        let captured = executor.clone();
+        executor.spawn(async move || {
+            let _keep_alive = captured;
+            core::future::pending::<()>().await;
+            Ok::<(), WieError>(())
+        });
+        assert!(Arc::strong_count(&executor.inner) > 1);
+        executor.shutdown();
+        executor.shutdown();
+        assert!(executor.inner.lock().tasks.is_empty());
+        drop(executor);
+        assert!(weak.upgrade().is_none());
+    }
+
     struct YieldOnce(bool);
 
     impl Future for YieldOnce {
@@ -278,6 +313,30 @@ mod tests {
             time.set(now + 1);
             Instant::from_epoch_millis(now)
         }
+    }
+
+    #[test]
+    fn idle_executor_returns_with_a_frozen_clock_and_can_resume() {
+        fn frozen_clock() -> impl Fn() -> Instant {
+            let reads = Cell::new(0);
+            move || {
+                reads.set(reads.get() + 1);
+                assert!(reads.get() < 32, "idle executor waited for wall-clock progress");
+                Instant::from_epoch_millis(0)
+            }
+        }
+
+        let mut executor = Executor::new();
+        executor.tick(frozen_clock()).unwrap();
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = completed.clone();
+        executor.spawn(move || async move {
+            YieldOnce(false).await;
+            task_completed.store(true, Ordering::Relaxed);
+        });
+        executor.tick(frozen_clock()).unwrap();
+        assert!(completed.load(Ordering::Relaxed));
+        executor.tick(frozen_clock()).unwrap();
     }
 
     #[test]

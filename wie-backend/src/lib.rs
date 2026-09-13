@@ -84,3 +84,12 @@ pub fn extract_zip(zip: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
         })
         .collect::<Result<_>>()
 }
+
+/// Read archive names without decompressing resource payloads.
+pub fn zip_entry_names(bytes: &[u8]) -> Result<Vec<String>> {
+    extern crate std;
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|error| WieError::FatalError(format!("Invalid zip archive: {error}")))?;
+    Ok(archive.file_names().map(|name| name.to_string()).collect())
+}
+
+pub mod hangul;

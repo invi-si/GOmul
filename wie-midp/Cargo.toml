@@ -12,6 +12,7 @@ bitflags = { workspace = true }
 bytemuck = { workspace = true }
 dyn-clone = { workspace = true }
 futures = { workspace = true }
+spin = { workspace = true }
 tracing = { workspace = true }
 
 jvm = { workspace = true }

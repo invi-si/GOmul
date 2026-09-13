@@ -13,6 +13,8 @@ pub struct Font;
 
 impl Font {
     pub const HEIGHT: i32 = 12;
+    // Matches the current backend draw_text baseline offset.
+    pub const BASELINE: i32 = 10;
 
     pub fn as_proto() -> WieJavaClassProto {
         WieJavaClassProto {
@@ -23,6 +25,7 @@ impl Font {
                 JavaMethodProto::new("<clinit>", "()V", Self::cl_init, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("<init>", "()V", Self::init, MethodAccessFlags::empty()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("getBaselinePosition", "()I", Self::get_baseline_position, MethodAccessFlags::PUBLIC),
                 JavaMethodProto::new("stringWidth", "(Ljava/lang/String;)I", Self::string_width, MethodAccessFlags::PUBLIC),
                 JavaMethodProto::new(
                     "substringWidth",
@@ -129,6 +132,10 @@ impl Font {
         tracing::warn!("stub javax.microedition.lcdui.Font::getHeight");
 
         Ok(Self::HEIGHT) // TODO: hardcoded
+    }
+
+    async fn get_baseline_position(_: &Jvm, _: &mut WieJvmContext) -> JvmResult<i32> {
+        Ok(Self::BASELINE)
     }
 
     async fn get_default_font(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {

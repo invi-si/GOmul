@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta
+      charset="UTF-8"
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>GOmul · 게임 목록</title>
+    <meta name="description" content="옛 한국 피처폰의 WIPI/J2ME 앱을 웹 브라우저에서 바로 실행하는 에뮬레이터. 앱을 브라우저에 보관하고 모바일과 PC에서 실행할 수 있습니다." />
+    <meta name="keywords" content="wie, WIPI, J2ME, 피처폰, 피처폰 앱, 에뮬레이터, 모바일 앱, 추억의 앱, 휴대폰 에뮬레이터" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="wie - 피처폰 앱 에뮬레이터" />
+    <meta property="og:description" content="옛 한국 피처폰의 WIPI/J2ME 앱을 웹 브라우저에서 바로 실행하는 에뮬레이터." />
+    <meta property="og:locale" content="ko_KR" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="icon" type="image/png" href="../assets/favicon.png" />
+    <link rel="stylesheet" href="@css/style.css" />
+    <link rel="stylesheet" href="@css/catalog.css" />
+    <script src="@ts/catalog-index.ts" defer="defer"></script>
+  </head>
+  <body class="catalog-mode">
+    <div id="library-view" class="catalog-shell">
+      <section id="catalog-loading" class="catalog-loading" aria-label="게임 불러오는 중" hidden>
+        <div class="loading-card">
+          <div class="loading-art"><span id="loading-fallback" aria-hidden="true"></span><img id="loading-image" alt="" hidden /></div>
+          <h2 id="loading-title"></h2>
+          <span class="loading-spinner" aria-hidden="true"></span>
+          <p id="loading-status" role="status" aria-live="polite"></p>
+          <button id="catalog-cancel" type="button" hidden>취소</button>
+        </div>
+      </section>
+      <header class="catalog-header">
+        <a class="catalog-brand" href="/"><span class="brand-icon">G</span> GOmul <span>고물 에뮬레이터</span></a>
+        <nav aria-label="도움말과 설정">
+          <button id="catalog-help" type="button">조작법</button>
+          <button id="catalog-bug-report" type="button">버그제보</button>
+          <button id="catalog-save-backup" type="button">저장 백업</button>
+          <button id="catalog-settings" type="button">설정</button>
+        </nav>
+      </header>
+      <main>
+        <div class="catalog-heading"><h1>전체 라이브러리</h1><label class="catalog-sort">정렬 <select id="catalog-sort" aria-label="정렬"><option value="asc">이름순 A → Z</option><option value="desc">이름순 Z → A</option></select></label><div class="catalog-views" aria-label="보기 방식"><button id="view-list" type="button" aria-label="목록 보기" aria-pressed="false">☰</button><button id="view-grid" type="button" aria-label="표지 보기" aria-pressed="true">▦</button></div></div>
+        <div class="catalog-filters">
+          <label class="search-wrap"><span>게임 검색</span><input id="catalog-search" type="search" placeholder="게임 이름으로 검색" autocomplete="off" /></label>
+          <label><span>통신사</span><select id="catalog-carrier"><option value="">전체 통신사</option><option>LGT</option><option>KTF</option><option>SKT</option></select></label>
+        </div>
+        <div class="catalog-meta"><span id="catalog-count">게임 목록</span><a href="https://dubigame.tistory.com" target="_blank" rel="noopener noreferrer">출처: 뚜비게임 ↗</a></div>
+        <div class="catalog-feedback"><p id="catalog-status" role="status" aria-live="polite">라이브러리를 준비하는 중…</p><button id="catalog-retry" type="button" hidden>다시 시도</button></div>
+        <ul id="catalog-list" data-view="grid" aria-label="게임 목록"></ul>
+      </main>
+      <footer class="catalog-footer">
+        <p>게임 선택 → 버전 선택 → 실행 <span>· 저장 데이터는 이 브라우저에 보관됩니다.</span></p>
+        <p>GOmul · Based on <a href="https://github.com/dlunch/wie" target="_blank" rel="noopener noreferrer">WIE / dlunch &amp; contributors</a> · <a href="./licenses/README.txt" target="_blank">오픈소스 라이선스</a></p>
+      </footer>
+    </div>
+
+    <section id="player-view" class="player-view" hidden>
+      <header class="player-toolbar">
+        <button id="back-to-library" class="icon-button" type="button" title="라이브러리" aria-label="라이브러리로 돌아가기">
+          <i data-lucide="arrow-left"></i>
+        </button>
+        <strong id="player-title" class="player-title"></strong>
+        <button id="native-save" type="button">저장</button><button id="native-load" type="button" disabled>불러오기</button>
+        <button id="app-settings" class="icon-button" type="button" title="설정" aria-label="설정">
+          <i data-lucide="settings"></i>
+        </button>
+      </header>
+
+      <p id="native-status" role="status"></p><p id="native-notice" role="status"></p>
+      <main class="player-main">
+        <div class="canvas-wrapper">
+          <canvas id="canvas" width="240" height="320"></canvas>
+        </div>
+
+        <div class="button-container direction-controls" aria-label="방향키 / Direction pad">
+          <div class="direction-pad">
+            <button data-key="UP" aria-label="위"><i data-lucide="arrow-up"></i></button>
+            <button data-key="LEFT" aria-label="왼쪽"><i data-lucide="arrow-left"></i></button>
+            <button data-key="OK">확인</button>
+            <button data-key="RIGHT" aria-label="오른쪽"><i data-lucide="arrow-right"></i></button>
+            <button data-key="DOWN" aria-label="아래"><i data-lucide="arrow-down"></i></button>
+          </div>
+          <div class="call-controls"><button class="call-key" data-key="CALL" aria-label="통화 키 / Call key">통화</button>
+          <button id="native-korean" type="button" aria-pressed="false">한글</button></div><p class="controls-hint">방향키 + 버튼 동시 입력</p>
+        </div>
+
+        <div class="button-container keypad-controls" aria-label="숫자 키패드 / Phone keypad">
+          <div class="soft-keys">
+            <button data-key="LSOFT" aria-label="왼쪽 소프트 키 / Left soft key">L</button>
+            <button data-key="CLR" aria-label="지우기 / Clear">지움</button>
+            <button data-key="RSOFT" aria-label="오른쪽 소프트 키 / Right soft key">R</button>
+          </div>
+          <div class="number-pad">
+            <button data-key="1">1</button>
+            <button data-key="2">2</button>
+            <button data-key="3">3</button>
+            <button data-key="4">4</button>
+            <button data-key="5">5</button>
+            <button data-key="6">6</button>
+            <button data-key="7">7</button>
+            <button data-key="8">8</button>
+            <button data-key="9">9</button>
+            <button data-key="*">*</button>
+            <button data-key="0">0</button>
+            <button data-key="#">#</button>
+          </div>
+        </div>
+      </main>
+    </section>
+
+    <dialog id="native-settings" class="app-dialog native-settings">
+      <p id="native-dialog-notice" role="status"></p>
+      <header class="dialog-header"><h2>게임 설정</h2><button id="native-close" class="icon-button" type="button" aria-label="닫기">×</button></header>
+      <div class="native-actions"><button id="native-korean-settings" aria-pressed="false">한글</button><button id="settings-save">빠른 저장</button><button id="settings-load" disabled>빠른 불러오기</button><button id="settings-recover" disabled>불러오기 전으로 복구</button></div>
+      <fieldset><legend>화면 크기 · 이 게임에만 적용</legend>
+        <label><input id="native-custom" type="checkbox" /> 직접 설정 (끄면 자동)</label>
+        <div class="native-dimensions"><label>가로 <input id="native-width" type="number" min="64" max="1024" value="240" /></label><label>세로 <input id="native-height" type="number" min="64" max="1024" value="320" /></label></div>
+        <label><input id="native-full" type="checkbox" /> 전체 화면 영역 표시 (LGT)</label>
+      </fieldset>
+      <fieldset><legend>실행 속도 <span id="native-speed-value">1.00×</span></legend><input id="native-speed" type="range" min="250" max="2000" step="250" value="1000" aria-label="실행 속도"/><p>0.25~2배 · 빠르게 실행하면 소리와 화면이 달라질 수 있습니다.</p></fieldset>
+      <fieldset><legend>시작 설정</legend><label>가상 전화번호 <input id="native-phone" type="tel" maxlength="11" placeholder="필요한 게임만 11자리 입력" /></label><label><input id="native-autostart" type="checkbox" /> 보호된 시작 상태 자동 불러오기</label><button id="native-startup">현재 장면을 시작 상태로 보호 저장</button><p>빠른 저장과 별개입니다. 이 브라우저에 보관한 시작 상태를 사용합니다.</p></fieldset>
+      <button id="native-apply" class="primary-command">설정 적용 (화면·전화번호 변경 시 재시작)</button>
+      <div class="native-actions"><button id="native-rescue">오류 보고서 만들기 (ZIP)</button><button id="native-latest-rescue" disabled>자동 오류 보고서 내보내기</button><button id="native-audio">소리 설정</button><button id="native-reset" class="danger-command">이 게임 저장 데이터 초기화</button></div>
+      <p>저장 데이터는 이 브라우저에 보관됩니다. 다른 브라우저·기기와 공유되지 않습니다. 사이트 데이터를 삭제하면 저장도 삭제됩니다. 진행 데이터는 15초마다, 빠른 저장·설정 변경·목록 복귀 시 동기화됩니다. 탭을 갑자기 닫으면 마지막 동기화 이후 진행은 유실될 수 있습니다.</p>
+    </dialog>
+
+    <dialog id="settings-dialog" class="app-dialog">
+      <form method="dialog">
+        <header class="dialog-header">
+          <h2>설정</h2>
+          <button class="icon-button dialog-close" value="cancel" title="닫기" aria-label="닫기">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="settings-fields">
+          <label>
+            <i data-lucide="music-2"></i>
+            <span>MIDI</span>
+            <input type="range" id="volume-midi" min="0" max="100" value="50" />
+          </label>
+          <label>
+            <i data-lucide="volume-2"></i>
+            <span>효과음</span>
+            <input type="range" id="volume-pcm" min="0" max="100" value="50" />
+          </label>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="bug-report-dialog" class="app-dialog" aria-labelledby="bug-report-title">
+      <form method="dialog">
+        <header class="dialog-header"><h2 id="bug-report-title">버그제보</h2><button class="icon-button" aria-label="닫기">×</button></header>
+        <p>게임 이용 중 문제가 발생했다면 오류 보고서를 보내 주세요. 개선에 큰 도움이 됩니다.</p>
+        <p>게임 화면의 <strong>설정 → 오류 보고서 만들기 (ZIP)</strong>을 눌러 보고서를 저장한 뒤, 아래 이메일로 ZIP 파일을 첨부해 보내 주세요. 화면이 멈춘 경우에도 직접 보고서를 만들 수 있습니다.</p>
+        <p><a href="mailto:v60675605@gmail.com">v60675605@gmail.com</a></p>
+        <p>게임 이름과 통신사 버전, 사용 기기·브라우저, 문제가 발생한 상황도 함께 알려 주세요. 가능하면 화면 캡처도 첨부해 주세요. 감사합니다!</p>
+        <button class="primary-command">확인</button>
+      </form>
+    </dialog>
+    <dialog id="ktf-notice-dialog" class="app-dialog" aria-labelledby="ktf-notice-title">
+      <form method="dialog">
+        <header class="dialog-header"><h2 id="ktf-notice-title">KTF 버전 이용 안내</h2><button class="icon-button" value="cancel" aria-label="닫기">×</button></header>
+        <p>KTF 버전은 다른 버전에 비해 테스트가 충분히 이루어지지 않아 버그가 더 있을 수 있습니다. 이용에 참고해 주세요.</p>
+        <p>문제가 발생하면 메인 메뉴의 <strong>버그제보</strong> 안내에 따라 오류 보고서를 보내 주시면 감사하겠습니다.</p>
+        <label><input id="ktf-notice-dismiss" type="checkbox" /> 다시 보지 않기 (이 브라우저)</label>
+        <div class="native-actions"><button value="cancel">취소</button><button value="continue" class="primary-command">확인 후 실행</button></div>
+      </form>
+    </dialog>
+    <dialog id="variant-dialog" class="app-dialog"><form method="dialog"><header class="dialog-header"><h2 id="variant-title">실행할 파일 선택</h2><button class="icon-button" aria-label="닫기">×</button></header><p id="variant-description">이 게임에는 여러 첨부파일이 있습니다.</p><div id="variant-list"></div></form></dialog>
+    <dialog id="help-dialog" class="app-dialog help-dialog">
+      <form method="dialog">
+        <header class="dialog-header">
+          <h2>조작 도움말</h2>
+          <button class="icon-button dialog-close" value="cancel" title="닫기" aria-label="닫기">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <table>
+          <tbody>
+            <tr><td><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>위 / 왼쪽 / 아래 / 오른쪽</td></tr>
+            <tr><td><kbd>0</kbd> <kbd>-</kbd> <kbd>=</kbd></td><td>숫자 1, 2, 3</td></tr>
+            <tr><td><kbd>O</kbd> <kbd>P</kbd> <kbd>[</kbd></td><td>숫자 4, 5, 6</td></tr>
+            <tr><td><kbd>L</kbd> <kbd>;</kbd> <kbd>'</kbd></td><td>숫자 7, 8, 9</td></tr>
+            <tr><td><kbd>,</kbd> <kbd>.</kbd> <kbd>/</kbd></td><td>*, 0, #</td></tr>
+            <tr><td><kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd></td><td>*, 0, #</td></tr>
+            <tr><td>방향키</td><td>이동</td></tr>
+            <tr><td><kbd>Space</kbd> / <kbd>Enter</kbd></td><td>OK</td></tr>
+            <tr><td><kbd>Backspace</kbd></td><td>CLR</td></tr>
+            <tr><td><kbd>F1</kbd> / <kbd>F2</kbd></td><td>통화 / 종료 키 (CALL / HANGUP)</td></tr>
+            <tr><td>왼쪽 / 오른쪽 <kbd>Shift</kbd></td><td>소프트 키 L / R</td></tr>
+          </tbody>
+        </table>
+        <p>모바일에서는 게임 아래 왼쪽에 방향키, 오른쪽에 숫자 키패드가 표시됩니다. 컴퓨터에서는 화면 키패드 없이 키보드로 조작합니다. 키보드 배치는 모든 기기에서 같습니다.</p>
+        <footer class="dialog-actions">
+          <label><input id="hide-help" type="checkbox" /> 다시 보지 않기</label>
+          <button class="secondary-command" value="cancel">닫기</button>
+        </footer>
+      </form>
+    </dialog>
+  </body>
+</html>

@@ -67,3 +67,27 @@ existing warnings. A regular APK is built with `rescue-replay` disabled.
 The installed regular APK passed synthetic Android Rescue instrumentation and
 rejected `rescue-verify` with `Unknown checkpoint action`, confirming the
 cross-build diagnostic path is absent from the regular build.
+
+## Minigame Heaven 4 context argument correction
+
+A later rescue reproduced an invalid read at `0xffffffff` in `UicGetTime`
+(0x338). The underlying failure was `UicCreate` returning -1: the native caller
+stores the application-context handle at SP, then passes SP to SVC 0x322.
+Its next call uses the returned component without checking for failure.
+
+The shared specification documents a by-value application context. The observed
+LGT native call convention therefore needs an adapter: dereference the caller's
+context slot once, then invoke shared component creation. The LGT SVC now does
+this; shared WIPI semantics and other carriers remain unchanged. There is no
+game-name check or fabricated time result for a failed component.
+
+A native-SVC regression covers class lookup, context creation, two independent
+date components, reuse of the caller's slot, null context rejection, the full
+nine-word time output with surrounding sentinels, and destruction of one
+component without affecting the other. All 38 LGT unit tests, its integration
+test, and 59 WIPI C tests pass. Workspace clippy completes with existing warnings.
+
+The original rescue reproduces exactly on the originating APK. Patched replay
+matches the saved safe-prefix frame byte-for-byte, then continues for five
+seconds to the game-selection screen (132 paints), without the fatal error.
+This validates the reported failure, not complete game compatibility.

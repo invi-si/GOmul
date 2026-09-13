@@ -1,0 +1,146 @@
+use alloc::vec;
+
+use jvm::{ClassInstanceRef, JavaChar, Jvm, Result, runtime::JavaLangString};
+use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
+use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
+
+use crate::{FileType, RuntimeClassProto, RuntimeContext, classes::java::lang::String};
+
+// class java.io.File
+pub struct File;
+
+impl File {
+    pub fn as_proto() -> RuntimeClassProto {
+        RuntimeClassProto {
+            name: "java/io/File",
+            parent_class: Some("java/lang/Object"),
+            interfaces: vec!["java/io/Serializable"],
+            methods: vec![
+                JavaMethodProto::new("<clinit>", "()V", Self::clinit, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("<init>", "(Ljava/lang/String;)V", Self::init, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("getPath", "()Ljava/lang/String;", Self::get_path, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("exists", "()Z", Self::exists, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("isDirectory", "()Z", Self::is_directory, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("isFile", "()Z", Self::is_file, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("delete", "()Z", Self::delete, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("length", "()J", Self::length, MethodAccessFlags::PUBLIC),
+            ],
+            fields: vec![
+                JavaFieldProto::new(
+                    "separatorChar",
+                    "C",
+                    FieldAccessFlags::PUBLIC | FieldAccessFlags::STATIC | FieldAccessFlags::FINAL,
+                ),
+                JavaFieldProto::new(
+                    "separator",
+                    "Ljava/lang/String;",
+                    FieldAccessFlags::PUBLIC | FieldAccessFlags::STATIC | FieldAccessFlags::FINAL,
+                ),
+                JavaFieldProto::new(
+                    "pathSeparatorChar",
+                    "C",
+                    FieldAccessFlags::PUBLIC | FieldAccessFlags::STATIC | FieldAccessFlags::FINAL,
+                ),
+                JavaFieldProto::new(
+                    "pathSeparator",
+                    "Ljava/lang/String;",
+                    FieldAccessFlags::PUBLIC | FieldAccessFlags::STATIC | FieldAccessFlags::FINAL,
+                ),
+                JavaFieldProto::new("path", "Ljava/lang/String;", FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
+            ],
+            access_flags: ClassAccessFlags::PUBLIC,
+        }
+    }
+
+    async fn clinit(jvm: &Jvm, _: &mut RuntimeContext) -> Result<()> {
+        tracing::debug!("java.io.File::<clinit>()");
+
+        let separator_char = if cfg!(windows) { '\\' } else { '/' };
+        let separator = if cfg!(windows) { "\\" } else { "/" };
+        let path_separator_char = if cfg!(windows) { ';' } else { ':' };
+        let path_separator = if cfg!(windows) { ";" } else { ":" };
+
+        jvm.put_static_field("java/io/File", "separatorChar", "C", separator_char as JavaChar)
+            .await?;
+        jvm.put_static_field(
+            "java/io/File",
+            "separator",
+            "Ljava/lang/String;",
+            JavaLangString::from_rust_string(jvm, separator).await?,
+        )
+        .await?;
+        jvm.put_static_field("java/io/File", "pathSeparatorChar", "C", path_separator_char as JavaChar)
+            .await?;
+        jvm.put_static_field(
+            "java/io/File",
+            "pathSeparator",
+            "Ljava/lang/String;",
+            JavaLangString::from_rust_string(jvm, path_separator).await?,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn init(jvm: &Jvm, _: &mut RuntimeContext, mut this: ClassInstanceRef<Self>, pathname: ClassInstanceRef<String>) -> Result<()> {
+        tracing::debug!("java.io.File::<init>({this:?}, {pathname:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        jvm.put_field(&mut this, "path", "Ljava/lang/String;", pathname).await?;
+
+        Ok(())
+    }
+
+    async fn get_path(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<ClassInstanceRef<String>> {
+        tracing::debug!("java.io.File::getPath({this:?})");
+
+        jvm.get_field(&this, "path", "Ljava/lang/String;").await
+    }
+
+    async fn exists(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<bool> {
+        tracing::debug!("java.io.File::exists({this:?})");
+
+        let path = jvm.invoke_virtual(&this, "java/io/File", "getPath", "()Ljava/lang/String;", ()).await?;
+        let path = JavaLangString::to_rust_string(jvm, &path).await?;
+
+        Ok(context.metadata(&path).await.is_ok())
+    }
+
+    async fn is_directory(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<bool> {
+        tracing::debug!("java.io.File::isDirectory({this:?})");
+
+        let path = jvm.invoke_virtual(&this, "java/io/File", "getPath", "()Ljava/lang/String;", ()).await?;
+        let path = JavaLangString::to_rust_string(jvm, &path).await?;
+
+        Ok(context.metadata(&path).await.is_ok_and(|x| x.r#type == FileType::Directory))
+    }
+
+    async fn is_file(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<bool> {
+        tracing::debug!("java.io.File::isFile({this:?})");
+
+        let path = jvm.invoke_virtual(&this, "java/io/File", "getPath", "()Ljava/lang/String;", ()).await?;
+        let path = JavaLangString::to_rust_string(jvm, &path).await?;
+
+        Ok(context.metadata(&path).await.is_ok_and(|x| x.r#type == FileType::File))
+    }
+
+    async fn delete(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<bool> {
+        tracing::debug!("java.io.File::delete({this:?})");
+
+        let path = jvm.invoke_virtual(&this, "java/io/File", "getPath", "()Ljava/lang/String;", ()).await?;
+        let path = JavaLangString::to_rust_string(jvm, &path).await?;
+
+        Ok(context.unlink(&path).await.is_ok())
+    }
+
+    async fn length(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<i64> {
+        tracing::debug!("java.io.File::length({this:?})");
+
+        let path = jvm.invoke_virtual(&this, "java/io/File", "getPath", "()Ljava/lang/String;", ()).await?;
+        let path = JavaLangString::to_rust_string(jvm, &path).await?;
+
+        // File.length() is 0 when the file does not exist
+        Ok(context.metadata(&path).await.map_or(0, |x| x.size as _))
+    }
+}

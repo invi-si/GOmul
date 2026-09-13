@@ -18,6 +18,7 @@ experimental-thumb-table = ["arm32_cpu/experimental-thumb-table"]
 cpu-throughput = []
 cpu-benchmark = []
 cpu-profiling = ["arm32_cpu/profiling"]
+cpu-boundary-trace = []
 
 [dependencies]
 async-trait = { workspace = true }

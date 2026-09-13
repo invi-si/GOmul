@@ -1,4 +1,14 @@
+const pendingWrites=new Set<Promise<void>>();
+function trackWrite(write:Promise<void>):Promise<void> {
+  const tracked=write.finally(()=>pendingWrites.delete(tracked));
+  pendingWrites.add(tracked);return tracked;
+}
+export async function flushBrowserWrites():Promise<void> {
+  await Promise.all([...pendingWrites]);
+}
+
 export class IndexedDBStore {
+  private static readonly opened = new Map<string, Promise<IndexedDBStore>>();
   private db: IDBDatabase;
   private store_name: string;
 
@@ -8,7 +18,9 @@ export class IndexedDBStore {
   }
 
   public static open(db_name: string, store_name: string): Promise<IndexedDBStore> {
-    return new Promise((resolve, reject) => {
+    const identity=JSON.stringify([db_name,store_name]);
+    const existing=this.opened.get(identity);if(existing)return existing;
+    const pending=new Promise<IndexedDBStore>((resolve, reject) => {
       const request = indexedDB.open(db_name);
 
       request.onupgradeneeded = (event) => {
@@ -19,13 +31,16 @@ export class IndexedDBStore {
       };
 
       request.onsuccess = (event) => {
-        resolve(new IndexedDBStore((event.target as IDBOpenDBRequest).result, store_name));
+        const db=(event.target as IDBOpenDBRequest).result;
+        db.onversionchange=()=>{db.close();this.opened.delete(identity);};
+        resolve(new IndexedDBStore(db, store_name));
       };
 
       request.onerror = (event) => {
         reject((event.target as IDBOpenDBRequest).error);
       };
-    });
+    }).catch(error=>{this.opened.delete(identity);throw error;});
+    this.opened.set(identity,pending);return pending;
   }
 
   public get_all_keys(): Promise<IDBValidKey[]> {
@@ -61,34 +76,32 @@ export class IndexedDBStore {
   }
 
   public set(key: IDBValidKey, data: Uint8Array): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return trackWrite(new Promise<void>((resolve, reject) => {
       const transaction = this.db.transaction(this.store_name, "readwrite");
       const store = transaction.objectStore(this.store_name);
       const request = store.put(data, key);
 
-      request.onsuccess = () => {
-        resolve();
-      };
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error || new Error("Browser save transaction aborted"));
 
       request.onerror = () => {
         reject(request.error);
       };
-    });
+    }));
   }
 
   public delete(key: IDBValidKey): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return trackWrite(new Promise<void>((resolve, reject) => {
       const transaction = this.db.transaction(this.store_name, "readwrite");
       const store = transaction.objectStore(this.store_name);
       const request = store.delete(key);
 
-      request.onsuccess = () => {
-        resolve();
-      };
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error || new Error("Browser save transaction aborted"));
 
       request.onerror = () => {
         reject(request.error);
       };
-    });
+    }));
   }
 }

@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{string::ToString, vec};
 
 use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult};
 use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
@@ -130,13 +130,26 @@ impl DataBase {
 
     async fn open_data_base_with_flags(
         jvm: &Jvm,
-        _: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         data_base_name: ClassInstanceRef<String>,
         record_size: i32,
         create: bool,
         flags: i32,
     ) -> JvmResult<ClassInstanceRef<DataBase>> {
         tracing::debug!("org.kwis.msp.db.DataBase::openDataBase({data_base_name:?}, {record_size}, {create}, {flags})");
+
+        let name = jvm::runtime::JavaLangString::to_rust_string(jvm, &data_base_name).await?;
+        let system = context.system();
+        let pid = system.pid().to_string();
+        let exists = system.platform().database_repository().exists(&name, &pid).await;
+        if !exists {
+            if !create {
+                return Err(jvm.exception("org/kwis/msp/db/DataBaseException", "Database does not exist").await);
+            }
+            // Materialize an empty database now, so close/reopen works even if
+            // the application has not inserted its first record yet.
+            system.platform().database_repository().open(&name, &pid).await;
+        }
 
         let record_store: ClassInstanceRef<RecordStore> = jvm
             .invoke_static(
@@ -439,6 +452,53 @@ mod test {
     use super::DataBase;
 
     #[test]
+    fn missing_database_requires_create_and_empty_creation_survives_reopen() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "open-contract").await?.into();
+            for descriptor in [
+                "(Ljava/lang/String;IZ)Lorg/kwis/msp/db/DataBase;",
+                "(Ljava/lang/String;IZI)Lorg/kwis/msp/db/DataBase;",
+            ] {
+                let result: JvmResult<ClassInstanceRef<DataBase>> = if descriptor.contains("IZI") {
+                    jvm.invoke_static("org/kwis/msp/db/DataBase", "openDataBase", descriptor, (name.clone(), 0, false, 0))
+                        .await
+                } else {
+                    jvm.invoke_static("org/kwis/msp/db/DataBase", "openDataBase", descriptor, (name.clone(), 0, false))
+                        .await
+                };
+                let Err(JavaError::JavaException(exception)) = result else {
+                    panic!("missing database opened");
+                };
+                assert!(jvm.is_instance(&*exception, "org/kwis/msp/db/DataBaseException"));
+            }
+            let database: ClassInstanceRef<DataBase> = jvm
+                .invoke_static(
+                    "org/kwis/msp/db/DataBase",
+                    "openDataBase",
+                    "(Ljava/lang/String;IZ)Lorg/kwis/msp/db/DataBase;",
+                    (name.clone(), 32, true),
+                )
+                .await?;
+            let _: () = jvm
+                .invoke_virtual(&database, "org/kwis/msp/db/DataBase", "closeDataBase", "()V", ())
+                .await?;
+            let reopened: ClassInstanceRef<DataBase> = jvm
+                .invoke_static(
+                    "org/kwis/msp/db/DataBase",
+                    "openDataBase",
+                    "(Ljava/lang/String;IZ)Lorg/kwis/msp/db/DataBase;",
+                    (name, 0, false),
+                )
+                .await?;
+            let count: i32 = jvm
+                .invoke_virtual(&reopened, "org/kwis/msp/db/DataBase", "getNumberOfRecords", "()I", ())
+                .await?;
+            assert_eq!(count, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
     fn test_database_state_selection_and_stubs() -> Result<()> {
         run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
             let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "storage-handset").await?.into();
@@ -517,7 +577,9 @@ mod test {
             let databases: ClassInstanceRef<Array<String>> = jvm
                 .invoke_static("org/kwis/msp/db/DataBase", "listDataBases", "()[Ljava/lang/String;", ())
                 .await?;
-            assert_eq!(jvm.array_length(&databases).await?, 0);
+            assert_eq!(jvm.array_length(&databases).await?, 1);
+            let listed = jvm.load_array::<ClassInstanceRef<String>>(&databases, 0, 1).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &listed[0]).await?, "storage-handset");
 
             let access_mode: i32 = jvm
                 .invoke_static("org/kwis/msp/db/DataBase", "getAccessMode", "(Ljava/lang/String;)I", (name.clone(),))

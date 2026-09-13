@@ -289,6 +289,31 @@ mod tests {
             let ptr_fields: u32 = read_generic(&core, ptr_array + offset_of!(RawJavaClassInstance, ptr_fields) as u32)?;
             assert_eq!(read_generic::<u32, _>(&core, ptr_fields + 4)?, ptr_value);
 
+            let wide = jvm.instantiate_array("J", 3).await.unwrap();
+            let target = get_java_interface_method(&mut core, 0xfd)?;
+            let pointer = wide.identity() as u32;
+            let fields: u32 = read_generic(&core, pointer + offset_of!(RawJavaClassInstance, ptr_fields) as u32)?;
+            write_generic(&mut core, fields + 4, 0xabcdef01u32)?;
+            for (index, low, high) in [(0, 0xffffffff, 0xffffffff), (2, 0x89abcdef, 0x01234567)] {
+                core.run_function::<()>(target, &[pointer, index, low, high]).await?;
+            }
+            assert_eq!(
+                read_generic::<[u32; 8], _>(&core, fields)?,
+                [3, 0xabcdef01, 0xffffffff, 0xffffffff, 0, 0, 0x89abcdef, 0x01234567]
+            );
+            struct Wide([u32; 2]);
+            impl wie_core_arm::RunFunctionResult<Wide> for Wide {
+                fn get(core: &ArmCore) -> Wide {
+                    Wide([core.read_param(0).unwrap(), core.read_param(1).unwrap()])
+                }
+            }
+            let load = get_java_interface_method(&mut core, 0x5b)?;
+            for (index, expected) in [(0, [u32::MAX, u32::MAX]), (1, [0, 0]), (2, [0x89abcdef, 0x01234567])] {
+                assert_eq!(core.run_function::<Wide>(load, &[pointer, index]).await?.0, expected);
+            }
+            let values: alloc::vec::Vec<i64> = jvm.load_array(&wide, 0, 3).await.unwrap();
+            assert_eq!(values, [-1, 0, 0x0123456789abcdef]);
+
             let ptr_dimensions = Allocator::alloc(&mut core, 8)?;
             write_generic(&mut core, ptr_dimensions, 2u32)?;
             write_generic(&mut core, ptr_dimensions + 4, 3u32)?;

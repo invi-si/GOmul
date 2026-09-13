@@ -1,12 +1,12 @@
-use alloc::vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 
 use bytemuck::{Pod, Zeroable};
 
 use wipi_types::wipic::WIPICWord;
 
-use wie_util::{Result, read_generic, write_generic};
+use wie_util::{Result, WieError, read_generic, write_generic};
 
-use crate::context::WIPICContext;
+use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -75,12 +75,24 @@ struct MdaClip {
 
     // not in sdk, for internal usage
     handle: u32,
+    generation: u32,
+    pending_callbacks: u32,
+    closed: u32,
 }
 
 pub async fn clip_create(context: &mut dyn WIPICContext, ptr_type: WIPICWord, buf_size: WIPICWord, callback: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_mdaClipCreate({ptr_type:#x}, {buf_size:#x}, {callback:#x})");
 
     let clip = context.alloc_raw(size_of::<MdaClip>() as u32)?;
+    write_generic(
+        context,
+        clip,
+        MdaClip {
+            h_proc: callback as i32,
+            handle: u32::MAX,
+            ..MdaClip::zeroed()
+        },
+    )?;
 
     Ok(clip)
 }
@@ -93,7 +105,16 @@ pub async fn clip_free(context: &mut dyn WIPICContext, clip: WIPICWord) -> Resul
         return Ok(0);
     }
 
-    context.free_raw(clip, size_of::<MdaClip>() as u32)?;
+    let mut data: MdaClip = read_generic(context, clip)?;
+    if data.closed != 0 {
+        return Ok(0);
+    }
+    data.closed = 1;
+    let _ = context.system().audio().close(data.handle);
+    write_generic(context, clip, data)?;
+    if data.pending_callbacks == 0 {
+        context.free_raw(clip, size_of::<MdaClip>() as u32)?;
+    }
 
     Ok(0)
 }
@@ -141,6 +162,8 @@ pub async fn clip_put_data(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, 
     let handle = handle.unwrap();
 
     let mut clip: MdaClip = read_generic(context, ptr_clip)?;
+    let _ = context.system().audio().close(clip.handle);
+    clip.generation = next_generation(clip.generation)?;
     clip.handle = handle;
     write_generic(context, ptr_clip, clip)?;
 
@@ -190,12 +213,28 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
         return Ok(0);
     }
 
-    let clip: MdaClip = read_generic(context, ptr_clip)?;
-
+    let mut clip: MdaClip = read_generic(context, ptr_clip)?;
+    if clip.closed != 0 {
+        return Ok(0);
+    }
+    let generation = next_generation(clip.generation)?;
     let result = context.system().audio().play(clip.handle, repeat != 0);
 
     if let Err(x) = result {
         tracing::error!("Failed to load audio: {x:?}");
+    } else {
+        clip.generation = generation;
+        if clip.h_proc != 0 {
+            clip.pending_callbacks = clip.pending_callbacks.checked_add(1).ok_or(WieError::AllocationFailure)?;
+            write_generic(context, ptr_clip, clip)?;
+            if let Err(error) = context.spawn(Box::new(PlaybackStarted { clip: ptr_clip, generation })) {
+                clip.pending_callbacks -= 1;
+                write_generic(context, ptr_clip, clip)?;
+                return Err(error);
+            }
+        } else {
+            write_generic(context, ptr_clip, clip)?;
+        }
     }
 
     Ok(0)
@@ -248,7 +287,9 @@ pub async fn stop(context: &mut dyn WIPICContext, ptr_clip: WIPICWord) -> Result
         return Ok(0);
     }
 
-    let clip: MdaClip = read_generic(context, ptr_clip)?;
+    let mut clip: MdaClip = read_generic(context, ptr_clip)?;
+    clip.generation = next_generation(clip.generation)?;
+    write_generic(context, ptr_clip, clip)?;
 
     let system = context.system();
 
@@ -279,4 +320,147 @@ pub async fn unk18(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<W
     tracing::warn!("stub MC_mdaUnk18({clip:#x})");
 
     Ok(0)
+}
+
+// Keep callback lifetime and cancellation in guest-owned clip storage. A queued
+// notification retains the allocation, so a freed/reused address cannot receive it.
+fn next_generation(value: u32) -> Result<u32> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| WieError::FatalError("Media generation exhausted".into()))
+}
+struct PlaybackStarted {
+    clip: u32,
+    generation: u32,
+}
+#[async_trait::async_trait]
+impl MethodBody<WieError> for PlaybackStarted {
+    async fn call(&self, context: &mut dyn WIPICContext, _: Box<[u32]>) -> Result<WIPICResult> {
+        let clip: MdaClip = read_generic(context, self.clip)?;
+        let result = if clip.closed == 0 && clip.generation == self.generation {
+            // Event 2 initializes the observed WIPI playback clock. Completion,
+            // pause/resume and stop notifications are separate contracts.
+            context.call_function(clip.h_proc as u32, &[self.clip, 2]).await.map(|_| ())
+        } else {
+            Ok(())
+        };
+        // The callback itself can stop, replay, or free the clip.
+        let mut clip: MdaClip = read_generic(context, self.clip)?;
+        clip.pending_callbacks -= 1;
+        write_generic(context, self.clip, clip)?;
+        if clip.closed != 0 && clip.pending_callbacks == 0 {
+            context.free_raw(self.clip, size_of::<MdaClip>() as u32)?;
+        }
+        result?;
+        Ok(WIPICResult { results: Vec::new() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::test::TestContext;
+    use wie_util::ByteWrite;
+    fn context() -> TestContext {
+        TestContext::with_system(wie_backend::System::new(
+            Box::new(test_utils::TestPlatform::new()),
+            "media",
+            "media",
+            wie_backend::DefaultTaskRunner,
+        ))
+    }
+    async fn put_valid(c: &mut TestContext, clip: u32) {
+        let data = b"MMMD\0\0\0\x02\0\0";
+        let ptr = c.alloc_raw(data.len() as u32).unwrap();
+        c.write_bytes(ptr, data).unwrap();
+        assert_eq!(clip_put_data(c, clip, ptr, data.len() as u32).await.unwrap(), data.len() as i32);
+        c.free_raw(ptr, data.len() as u32).unwrap();
+    }
+    async fn loaded(c: &mut TestContext, callback: u32) -> u32 {
+        let clip = clip_create(c, 0, 0, callback).await.unwrap();
+        put_valid(c, clip).await;
+        clip
+    }
+    async fn drain(c: &mut TestContext) {
+        while !c.spawned.is_empty() {
+            let callback = c.spawned.remove(0);
+            callback.call(c, Box::new([])).await.unwrap();
+        }
+    }
+    #[futures_test::test]
+    async fn invalid_clip_data_preserves_the_current_clip() {
+        let mut c = context();
+        let clip = loaded(&mut c, 0x101).await;
+        let before: MdaClip = read_generic(&mut c, clip).unwrap();
+        assert_eq!(clip_put_data(&mut c, clip, 0, 0).await.unwrap(), 0);
+        let after: MdaClip = read_generic(&mut c, clip).unwrap();
+        assert_eq!(before.handle, after.handle);
+        assert_eq!(before.generation, after.generation);
+        play(&mut c, clip, 0).await.unwrap();
+        drain(&mut c).await;
+        assert_eq!(c.calls, vec![(0x101, vec![clip, 2])]);
+    }
+    #[futures_test::test]
+    async fn playback_start_is_deferred_and_requires_loaded_audio_and_listener() {
+        let mut c = context();
+        let invalid = clip_create(&mut c, 0, 0, 0x101).await.unwrap();
+        play(&mut c, invalid, 0).await.unwrap();
+        assert!(c.spawned.is_empty());
+        let silent = loaded(&mut c, 0).await;
+        play(&mut c, silent, 0).await.unwrap();
+        assert!(c.spawned.is_empty());
+        let clip = loaded(&mut c, 0x101).await;
+        play(&mut c, clip, 0).await.unwrap();
+        assert!(c.calls.is_empty());
+        assert_eq!(c.spawned.len(), 1);
+        drain(&mut c).await;
+        assert_eq!(c.calls, vec![(0x101, vec![clip, 2])]);
+    }
+    #[futures_test::test]
+    async fn stop_replay_and_data_replacement_cancel_stale_starts() {
+        let mut c = context();
+        let clip = loaded(&mut c, 0x101).await;
+        play(&mut c, clip, 0).await.unwrap();
+        stop(&mut c, clip).await.unwrap();
+        drain(&mut c).await;
+        assert!(c.calls.is_empty());
+        play(&mut c, clip, 0).await.unwrap();
+        play(&mut c, clip, 0).await.unwrap();
+        drain(&mut c).await;
+        assert_eq!(c.calls.len(), 1);
+        c.calls.clear();
+        play(&mut c, clip, 0).await.unwrap();
+        put_valid(&mut c, clip).await;
+        drain(&mut c).await;
+        assert!(c.calls.is_empty());
+    }
+    #[futures_test::test]
+    async fn free_retains_allocation_until_queued_start_is_discarded() {
+        let mut c = context();
+        let clip = loaded(&mut c, 0x101).await;
+        c.raw_freed.clear(); // Start observing frees after fixture setup.
+        play(&mut c, clip, 0).await.unwrap();
+        clip_free(&mut c, clip).await.unwrap();
+        assert!(c.raw_freed.is_empty());
+        drain(&mut c).await;
+        assert!(c.calls.is_empty());
+        assert_eq!(c.raw_freed, vec![clip]);
+    }
+    #[futures_test::test]
+    async fn callback_closing_clip_releases_after_return() {
+        let mut c = context();
+        c.pixel_callback = Some(|c, _, args| {
+            let mut clip: MdaClip = read_generic(c, args[0])?;
+            assert_eq!(clip.pending_callbacks, 1);
+            clip.closed = 1;
+            write_generic(c, args[0], clip)?;
+            Ok(0)
+        });
+        let clip = loaded(&mut c, 0x101).await;
+        c.raw_freed.clear(); // Start observing frees after fixture setup.
+        play(&mut c, clip, 0).await.unwrap();
+        drain(&mut c).await;
+        assert_eq!(c.calls.len(), 1);
+        assert_eq!(c.raw_freed, vec![clip]);
+    }
 }

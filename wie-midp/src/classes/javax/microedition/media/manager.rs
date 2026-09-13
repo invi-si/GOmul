@@ -37,8 +37,13 @@ impl Manager {
     ) -> Result<ClassInstanceRef<Player>> {
         tracing::debug!("javax.microedition.media.Manager::createPlayer({stream:?}, {type:?})");
 
-        let type_string = JavaLangString::to_rust_string(jvm, &r#type).await?;
-        if type_string == "application/vnd.smaf" {
+        if stream.is_null() {
+            return Err(jvm.exception("java/lang/IllegalArgumentException", "Media stream is null").await);
+        }
+        // A null content type requests detection. The available SMAF loader
+        // validates its input and reports MediaException if it cannot decode it.
+        let is_smaf = r#type.is_null() || JavaLangString::to_rust_string(jvm, &r#type).await? == "application/vnd.smaf";
+        if is_smaf {
             Ok(jvm.new_class("net/wie/SmafPlayer", "(Ljava/io/InputStream;)V", (stream,)).await?.into())
         } else {
             Err(jvm.exception("javax/microedition/media/MediaException", "Unsupported media type").await)

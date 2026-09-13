@@ -1,0 +1,58 @@
+use alloc::boxed::Box;
+
+use dyn_clone::{DynClone, clone_trait_object};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FileDescriptorId(u32);
+
+impl FileDescriptorId {
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub fn id(&self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug)]
+pub enum IOError {
+    Unsupported,
+    NotFound,
+    Io,
+}
+
+pub type IOResult<T> = Result<T, IOError>;
+pub type FileSize = u64;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileOpenOptions {
+    pub read: bool,
+    pub write: bool,
+    pub append: bool,
+    pub truncate: bool,
+    pub create: bool,
+}
+
+#[derive(Eq, PartialEq)]
+pub enum FileType {
+    File,
+    Directory,
+}
+
+pub struct FileStat {
+    pub size: FileSize,
+    pub r#type: FileType,
+}
+
+#[async_trait::async_trait]
+pub trait File: Send + DynClone {
+    async fn read(&mut self, buf: &mut [u8]) -> IOResult<usize>;
+    async fn write(&mut self, buf: &[u8]) -> IOResult<usize>;
+    async fn seek(&mut self, pos: FileSize) -> IOResult<()>;
+    async fn tell(&self) -> IOResult<FileSize>;
+    async fn set_len(&mut self, len: FileSize) -> IOResult<()>;
+    async fn metadata(&self) -> IOResult<FileStat>;
+}
+
+clone_trait_object!(File);

@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::util::run_js_future;
 
-#[wasm_bindgen(module = "/src/ts/indexed_db_store.ts")]
+#[wasm_bindgen(module = "indexed_db_store")]
 extern "C" {
     type IndexedDBStore;
 
@@ -18,11 +18,11 @@ extern "C" {
     #[wasm_bindgen(method)]
     async fn get(this: &IndexedDBStore, key: &JsValue) -> JsValue;
 
-    #[wasm_bindgen(method)]
-    async fn set(this: &IndexedDBStore, key: &JsValue, data: Uint8Array);
+    #[wasm_bindgen(method, catch)]
+    async fn set(this: &IndexedDBStore, key: &JsValue, data: Uint8Array) -> Result<(), JsValue>;
 
-    #[wasm_bindgen(method)]
-    async fn delete(this: &IndexedDBStore, key: &JsValue);
+    #[wasm_bindgen(method, catch)]
+    async fn delete(this: &IndexedDBStore, key: &JsValue) -> Result<(), JsValue>;
 }
 
 unsafe impl Sync for IndexedDBStore {}
@@ -32,7 +32,7 @@ pub struct Store {
     js: IndexedDBStore,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreKey {
     String(String),
     Pair(String, String),
@@ -61,9 +61,25 @@ impl Store {
         Self { js }
     }
 
-    pub async fn get_all_keys(&self) -> Vec<String> {
+    pub async fn get_all_keys(&self) -> Vec<StoreKey> {
         let js: IndexedDBStore = self.js.clone().into();
-        run_js_future(async move { js.get_all_keys().await.iter().filter_map(|key| key.as_string()).collect() }).await
+        run_js_future(async move {
+            js.get_all_keys()
+                .await
+                .iter()
+                .filter_map(|key| {
+                    if let Some(value) = key.as_string() {
+                        Some(StoreKey::String(value))
+                    } else if Array::is_array(&key) {
+                        let pair = Array::from(&key);
+                        Some(StoreKey::Pair(pair.get(0).as_string()?, pair.get(1).as_string()?))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .await
     }
 
     pub async fn get(&self, key: StoreKey) -> Option<Vec<u8>> {
@@ -79,18 +95,33 @@ impl Store {
         .await
     }
 
-    pub async fn set(&self, key: StoreKey, data: &[u8]) {
+    pub async fn set(&self, key: StoreKey, data: &[u8]) -> bool {
         let js: IndexedDBStore = self.js.clone().into();
         let data = data.to_vec();
         run_js_future(async move {
             let array = Uint8Array::from(data.as_slice());
-            js.set(&key.into_js_value(), array).await;
+            match js.set(&key.into_js_value(), array).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!("Browser save write failed: {error:?}");
+                    false
+                }
+            }
         })
-        .await;
+        .await
     }
 
-    pub async fn delete(&self, key: StoreKey) {
+    pub async fn delete(&self, key: StoreKey) -> bool {
         let js: IndexedDBStore = self.js.clone().into();
-        run_js_future(async move { js.delete(&key.into_js_value()).await }).await;
+        run_js_future(async move {
+            match js.delete(&key.into_js_value()).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!("Browser save delete failed: {error:?}");
+                    false
+                }
+            }
+        })
+        .await
     }
 }

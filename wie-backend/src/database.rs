@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 
 pub type RecordId = u32;
 
@@ -20,4 +20,8 @@ pub trait DatabaseRepository {
     async fn delete(&self, name: &str, app_id: &str) -> bool;
     /// Returns the bytes occupied by all databases owned by `app_id`.
     async fn usage(&self, app_id: &str) -> u64;
+    /// Directory operations for stream-style stores. None/false means unavailable
+    /// or failed; callers must not report success for unsupported backends.
+    async fn create_directory(&self, name: &str, app_id: &str) -> bool;
+    async fn list_directory(&self, name: &str, app_id: &str) -> Option<Vec<String>>;
 }

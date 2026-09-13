@@ -17,6 +17,7 @@ enum EventQueueEvent {
     // TODO it's wipi event codes
     KeyEvent = 1,
     RepaintEvent = 41,
+    TextInputMode = 42,
     NotifyEvent = 1000,
 }
 
@@ -25,6 +26,7 @@ impl EventQueueEvent {
         Some(match raw {
             x if x == Self::KeyEvent as i32 => Self::KeyEvent,
             x if x == Self::RepaintEvent as i32 => Self::RepaintEvent,
+            x if x == Self::TextInputMode as i32 => Self::TextInputMode,
             x if x == Self::NotifyEvent as i32 => Self::NotifyEvent,
             _ => return None,
         })
@@ -220,6 +222,11 @@ impl EventQueue {
             }
             // Callbacks queued during delivery wait until the next event-loop iteration.
             let batch = trace::wall_span(73, callback_count as u64);
+            if callback_count > 0 {
+                for (event, id) in pending_timer_events.drain(..) {
+                    context.system().event_queue().push_traced(event, id);
+                }
+            }
             for _ in 0..callback_count {
                 let event: ClassInstanceRef<Runnable> = jvm
                     .invoke_virtual(&call_serially_events, "java/util/Vector", "remove", "(I)Ljava/lang/Object;", (0,))
@@ -241,6 +248,7 @@ impl EventQueue {
                 }
                 let event_data = match x {
                     Event::Redraw => vec![EventQueueEvent::RepaintEvent as _, 0, 0, 0],
+                    Event::TextInputMode(korean) => vec![EventQueueEvent::TextInputMode as _, i32::from(korean), 0, 0],
                     Event::Keydown(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyPressed as _,
@@ -264,6 +272,11 @@ impl EventQueue {
                         trace::event(87, b'I', event_id.raw(), now.raw());
                         // TODO we should wait for timer more efficiently
                         if due <= now {
+                            // A guest callback may run a nested modal loop. Do not
+                            // hide earlier future timers in this suspended frame.
+                            for (event, id) in pending_timer_events.drain(..) {
+                                context.system().event_queue().push_traced(event, id);
+                            }
                             let ran = match trace::observe(75, event_id.raw(), callback()).await {
                                 Ok(ran) => ran,
                                 Err(error) => return Err(jvm.exception("net/wie/WieError", &error.to_string()).await),
@@ -340,6 +353,19 @@ impl EventQueue {
 
         trace::event(83, b'I', dispatch.id, event[0] as u64);
         match event_kind {
+            EventQueueEvent::TextInputMode => {
+                let old: bool = jvm.get_static_field("javax/microedition/lcdui/Display", "koreanInput", "Z").await?;
+                if old != (event[1] != 0) {
+                    let epoch: i32 = jvm.get_static_field("javax/microedition/lcdui/Display", "inputModeEpoch", "I").await?;
+                    jvm.put_static_field("javax/microedition/lcdui/Display", "inputModeEpoch", "I", epoch.wrapping_add(1))
+                        .await?;
+                }
+                jvm.put_static_field("javax/microedition/lcdui/Display", "koreanInput", "Z", event[1] != 0)
+                    .await?;
+                let _: () = jvm
+                    .invoke_virtual(&display, "javax/microedition/lcdui/Display", "handlePaintEvent", "()V", ())
+                    .await?;
+            }
             EventQueueEvent::RepaintEvent => {
                 // serviceRepaints may have already consumed the Java request
                 // before its frontend notification reaches this queue. Native
@@ -715,6 +741,55 @@ mod test {
                     .invoke_virtual(&queue, "net/wie/EventQueue", "dispatchEvent", "([I)V", (redraw,))
                     .await?;
                 assert_eq!(jvm.get_field::<i32>(&callback, "paints", "I").await?, 3);
+                Ok(())
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod nested_timer_tests {
+    use alloc::{boxed::Box, sync::Arc};
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use jvm::ClassInstanceRef;
+    use test_utils::{TestClock, TestPlatform, run_jvm_test_with_system};
+    use wie_backend::{Event, KeyCode};
+    #[test]
+    fn future_timers_remain_visible_while_a_guest_callback_runs() -> wie_util::Result<()> {
+        let clock = TestClock::new();
+        clock.set(100);
+        run_jvm_test_with_system(
+            Box::new([crate::get_protos().into()]),
+            Box::new(TestPlatform::with_clock(clock)),
+            |jvm, system| async move {
+                let queue: ClassInstanceRef<()> = jvm
+                    .invoke_static("net/wie/EventQueue", "getEventQueue", "()Lnet/wie/EventQueue;", ())
+                    .await?;
+                let visible = Arc::new(AtomicBool::new(false));
+                let found = visible.clone();
+                let nested_system = system.clone();
+                system
+                    .event_queue()
+                    .push(Event::timer(system.platform().now() + 100, || async { Ok(()) }));
+                system.event_queue().push(Event::timer(system.platform().now(), move || async move {
+                    let mut saved = alloc::vec::Vec::new();
+                    while let Some(event) = nested_system.event_queue().pop() {
+                        if matches!(&event, Event::Timer { due, .. } if due.raw() == 200) {
+                            found.store(true, Ordering::SeqCst);
+                        }
+                        saved.push(event);
+                    }
+                    for event in saved {
+                        nested_system.event_queue().push(event);
+                    }
+                    Ok(())
+                }));
+                system.event_queue().push(Event::Keydown(KeyCode::NUM1));
+                let event = jvm.instantiate_array("I", 4).await?;
+                let _: () = jvm
+                    .invoke_virtual(&queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event,))
+                    .await?;
+                assert!(visible.load(Ordering::SeqCst));
                 Ok(())
             },
         )

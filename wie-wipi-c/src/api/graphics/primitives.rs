@@ -68,6 +68,51 @@ pub fn fill_rect(
     write_canvas(context, framebuffer, |canvas| canvas.fill_rect(x, y, width, height, color, clip))
 }
 
+/// Even-odd polygon fill, sampling pixel centers and excluding upper edge endpoints.
+pub fn fill_polygon(context: &mut dyn WIPICContext, framebuffer: &FrameBuffer, points: &[(i32, i32)], color: Color, clip: Clip) -> Result<()> {
+    if points.len() < 3 {
+        return Ok(());
+    }
+    let bounds = Clip {
+        x: 0,
+        y: 0,
+        width: framebuffer.0.width,
+        height: framebuffer.0.height,
+    };
+    let clip = clip.intersect(&bounds);
+    let mut intersections = alloc::vec::Vec::with_capacity(points.len());
+    write_canvas(context, framebuffer, |canvas| {
+        for y in i64::from(clip.y)..i64::from(clip.y) + i64::from(clip.height) {
+            intersections.clear();
+            for i in 0..points.len() {
+                let (mut x1, mut y1) = points[i];
+                let (mut x2, mut y2) = points[(i + 1) % points.len()];
+                if y1 > y2 {
+                    core::mem::swap(&mut x1, &mut x2);
+                    core::mem::swap(&mut y1, &mut y2);
+                }
+                if y < i64::from(y1) || y >= i64::from(y2) {
+                    continue;
+                }
+                let dy = i128::from(y2) - i128::from(y1);
+                let denominator = 2 * dy;
+                let numerator = i128::from(x1) * denominator + (2 * i128::from(y) + 1 - 2 * i128::from(y1)) * (i128::from(x2) - i128::from(x1));
+                // ceil(intersection - 0.5): first pixel center on/right of the edge.
+                let edge = -(-(numerator - dy)).div_euclid(denominator);
+                intersections.push(edge);
+            }
+            intersections.sort_unstable();
+            for pair in intersections.chunks_exact(2) {
+                let left = pair[0].max(i128::from(clip.x));
+                let right = pair[1].min(i128::from(clip.x) + i128::from(clip.width));
+                if right > left {
+                    canvas.fill_rect(left as i32, y as i32, (right - left) as u32, 1, color, clip);
+                }
+            }
+        }
+    })
+}
+
 pub fn draw_line(
     context: &mut dyn WIPICContext,
     framebuffer: &FrameBuffer,
@@ -126,6 +171,71 @@ pub fn fill_arc(
     write_canvas(context, framebuffer, |canvas| {
         canvas.fill_arc(x, y, width, height, start_angle, arc_angle, color, clip)
     })
+}
+
+/// Invoke the guest pixel operation for each visible pixel. The ABI passes the
+/// existing framebuffer pixel first, the incoming pixel second, then param1.
+/// Keep writes in guest memory between callbacks: callbacks may read that memory
+/// or fail, and earlier completed pixels must remain observable.
+pub async fn draw_image_with_pixel_op(
+    context: &mut dyn WIPICContext,
+    framebuffer: &FrameBuffer,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    image: alloc::boxed::Box<dyn Image>,
+    source_x: i32,
+    source_y: i32,
+    clip: Clip,
+    pixel_op: u32,
+    param: u32,
+) -> Result<()> {
+    if pixel_op == 0 {
+        return draw_image(context, framebuffer, x, y, width, height, &*image, source_x, source_y, clip);
+    }
+    use wie_backend::canvas::{ArgbPixel, Rgb565Pixel};
+    use wie_util::{WieError, read_generic, write_generic};
+    let bytes_per_pixel = match framebuffer.0.bpp {
+        16 => 2u32,
+        32 => 4u32,
+        _ => return Err(WieError::FatalError("Unsupported pixel operation framebuffer depth".into())),
+    };
+    let row_bytes = framebuffer.0.width.checked_mul(bytes_per_pixel).ok_or(WieError::AllocationFailure)?;
+    if framebuffer.0.bpl < row_bytes {
+        return Err(WieError::FatalError("Invalid pixel operation framebuffer stride".into()));
+    }
+    let base = context.data_ptr(framebuffer.0.buf)?;
+    let size = framebuffer.0.bpl.checked_mul(framebuffer.0.height).ok_or(WieError::AllocationFailure)?;
+    base.checked_add(size).ok_or(WieError::InvalidMemoryAccess(base))?;
+    let left = 0i64.max(-(x as i64)).max(-(source_x as i64)).max(clip.x as i64 - x as i64);
+    let top = 0i64.max(-(y as i64)).max(-(source_y as i64)).max(clip.y as i64 - y as i64);
+    let right = (width as i64)
+        .min(framebuffer.0.width as i64 - x as i64)
+        .min(image.width() as i64 - source_x as i64)
+        .min(clip.x as i64 + clip.width as i64 - x as i64);
+    let bottom = (height as i64)
+        .min(framebuffer.0.height as i64 - y as i64)
+        .min(image.height() as i64 - source_y as i64)
+        .min(clip.y as i64 + clip.height as i64 - y as i64);
+    for row in top..bottom {
+        for column in left..right {
+            let address = base + (y as i64 + row) as u32 * framebuffer.0.bpl + (x as i64 + column) as u32 * bytes_per_pixel;
+            let color = image.get_pixel((source_x as i64 + column) as i32, (source_y as i64 + row) as i32);
+            let (old, incoming) = if bytes_per_pixel == 2 {
+                (read_generic::<u16, _>(context, address)? as u32, Rgb565Pixel::from_color(color) as u32)
+            } else {
+                (read_generic::<u32, _>(context, address)?, ArgbPixel::from_color(color))
+            };
+            let result = context.call_function(pixel_op, &[old, incoming, param]).await?;
+            if bytes_per_pixel == 2 {
+                write_generic(context, address, result as u16)?;
+            } else {
+                write_generic(context, address, result)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn draw_image(
@@ -296,6 +406,163 @@ mod tests {
         },
         context::{WIPICContext, test::TestContext},
     };
+
+    #[futures_test::test]
+    async fn pixel_callback_preserves_key_and_receives_native_pixels_after_clipping() -> Result<()> {
+        use alloc::vec;
+        use wie_backend::canvas::{Rgb565Pixel, VecImageBuffer};
+        use wie_util::write_generic;
+        let mut context = TestContext::new();
+        context.pixel_callback = Some(|_, address, args| {
+            assert_eq!(address, 0x101);
+            Ok(if args[1] == args[2] { args[0] } else { args[1] })
+        });
+        let fb = FrameBuffer::new(&mut context, 4, 1, 16)?;
+        for i in 0..4 {
+            write_generic(&mut context, fb.0.buf.0 + i * 2, 0x07e0u16)?;
+        }
+        let source = VecImageBuffer::<Rgb565Pixel>::from_raw(4, 1, vec![0xf800, 0xf81f, 0x001f, 0xffff]);
+        super::draw_image_with_pixel_op(
+            &mut context,
+            &fb,
+            -1,
+            0,
+            4,
+            1,
+            alloc::boxed::Box::new(source),
+            0,
+            0,
+            Clip {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 1,
+            },
+            0x101,
+            0xf81f,
+        )
+        .await?;
+        assert_eq!(
+            context.calls,
+            vec![(0x101, vec![0x07e0, 0xf81f, 0xf81f]), (0x101, vec![0x07e0, 0x001f, 0xf81f])]
+        );
+        assert_eq!(fb.data(&context)?, vec![0xe0, 7, 0x1f, 0, 0xe0, 7, 0xe0, 7]);
+        // No callback means ordinary magenta artwork must remain visible.
+        super::draw_image_with_pixel_op(
+            &mut context,
+            &fb,
+            0,
+            0,
+            1,
+            1,
+            alloc::boxed::Box::new(VecImageBuffer::<Rgb565Pixel>::from_raw(1, 1, vec![0xf81f])),
+            0,
+            0,
+            Clip {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 1,
+            },
+            0,
+            0,
+        )
+        .await?;
+        assert_eq!(&fb.data(&context)?[..2], &[0x1f, 0xf8]);
+        Ok(())
+    }
+
+    #[futures_test::test]
+    async fn pixel_callback_writes_are_visible_and_faults_preserve_completed_pixels() -> Result<()> {
+        use alloc::vec;
+        use wie_backend::canvas::{ArgbPixel, VecImageBuffer};
+        use wie_util::{WieError, read_generic};
+        let mut context = TestContext::new();
+        let fb = FrameBuffer::new(&mut context, 3, 1, 32)?;
+        context.pixel_callback = Some(|context, _, args| {
+            if context.calls.len() == 2 {
+                // Test allocator starts at 0x10000; no extra allocations occur.
+                assert_eq!(read_generic::<u32, _>(context, 0x10000)?, 0xff123456);
+                return Err(WieError::InvalidMemoryAccess(0xdead));
+            }
+            Ok(args[1])
+        });
+        let source = VecImageBuffer::<ArgbPixel>::from_raw(3, 1, vec![0xff123456, 0xffabcdef, 0xffffffff]);
+        let result = super::draw_image_with_pixel_op(
+            &mut context,
+            &fb,
+            0,
+            0,
+            3,
+            1,
+            alloc::boxed::Box::new(source),
+            0,
+            0,
+            Clip {
+                x: 0,
+                y: 0,
+                width: 3,
+                height: 1,
+            },
+            0x101,
+            0,
+        )
+        .await;
+        assert!(matches!(result, Err(WieError::InvalidMemoryAccess(0xdead))));
+        assert_eq!(context.calls.len(), 2);
+        assert_eq!(read_generic::<u32, _>(&context, fb.0.buf.0)?, 0xff123456);
+        assert_eq!(read_generic::<u32, _>(&context, fb.0.buf.0 + 4)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn polygon_fill_handles_concavity_winding_clipping_and_extreme_coordinates() -> Result<()> {
+        let red = Color { a: 255, r: 255, g: 0, b: 0 };
+        let clip = Clip {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        for bpp in [16, 32] {
+            let mut points = alloc::vec![(0, 0), (4, 0), (4, 2), (2, 2), (2, 4), (0, 4)];
+            for _ in 0..2 {
+                let mut context = TestContext::new();
+                let framebuffer = FrameBuffer::new(&mut context, 4, 4, bpp)?;
+                super::fill_polygon(&mut context, &framebuffer, &points, red, clip)?;
+                let image = framebuffer.image(&mut context)?;
+                for y in 0..4 {
+                    for x in 0..4 {
+                        assert_eq!(image.get_pixel(x, y).r, if x < 2 || y < 2 { 255 } else { 0 });
+                    }
+                }
+                points.reverse();
+            }
+            let mut context = TestContext::new();
+            let framebuffer = FrameBuffer::new(&mut context, 4, 4, bpp)?;
+            let huge = [(i32::MIN, i32::MIN), (i32::MAX, i32::MIN), (i32::MAX, i32::MAX), (i32::MIN, i32::MAX)];
+            super::fill_polygon(
+                &mut context,
+                &framebuffer,
+                &huge,
+                red,
+                Clip {
+                    x: 1,
+                    y: 1,
+                    width: 2,
+                    height: 2,
+                },
+            )?;
+            super::fill_polygon(&mut context, &framebuffer, &[(0, 0), (3, 3)], red, clip)?;
+            let image = framebuffer.image(&mut context)?;
+            for y in 0..4 {
+                for x in 0..4 {
+                    assert_eq!(image.get_pixel(x, y).r, if (1..3).contains(&x) && (1..3).contains(&y) { 255 } else { 0 });
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn drawing_primitives_write_the_guest_framebuffer() -> Result<()> {

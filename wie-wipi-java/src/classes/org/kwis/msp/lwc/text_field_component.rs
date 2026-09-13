@@ -29,19 +29,23 @@ impl TextFieldComponent {
     async fn init(
         jvm: &Jvm,
         _: &mut WieJvmContext,
-        this: ClassInstanceRef<TextFieldComponent>,
+        mut this: ClassInstanceRef<TextFieldComponent>,
         data: ClassInstanceRef<String>,
         constraint: i32,
     ) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lwc.TextFieldComponent::<init>({this:?}, {data:?}, {constraint:?})");
+        if !(0..=5).contains(&constraint) {
+            return Err(jvm.exception("java/lang/IllegalArgumentException", "Invalid text constraint").await);
+        }
 
         let _: () = jvm.invoke_special(&this, "org/kwis/msp/lwc/TextComponent", "<init>", "()V", ()).await?;
 
-        Ok(())
+        jvm.put_field(&mut this, "constraint", "I", constraint).await?;
+        jvm.invoke_special(&this, "org/kwis/msp/lwc/TextComponent", "setString", "(Ljava/lang/String;)V", (data,))
+            .await
     }
 
     async fn insert(
-        _: &Jvm,
+        jvm: &Jvm,
         _: &mut WieJvmContext,
         this: ClassInstanceRef<TextFieldComponent>,
         data: ClassInstanceRef<Array<u16>>,
@@ -49,9 +53,14 @@ impl TextFieldComponent {
         length: i32,
         index: i32,
     ) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lwc.TextFieldComponent::insert({this:?}, {data:?}, {offset}, {length}, {index})");
-
-        Ok(())
+        jvm.invoke_special(
+            &this,
+            "org/kwis/msp/lwc/TextComponent",
+            "insert",
+            "([CIII)V",
+            (data, offset, length, index),
+        )
+        .await
     }
 
     async fn set_string(

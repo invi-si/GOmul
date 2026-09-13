@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, format, vec};
 
 use bytemuck::cast_slice;
 use jvm::{
@@ -37,6 +37,12 @@ impl KtfClassLoader {
                     "<init>",
                     "(Ljava/lang/ClassLoader;Ljava/lang/String;II)V",
                     Self::init,
+                    MethodAccessFlags::PUBLIC,
+                ),
+                JavaMethodProto::new(
+                    "loadClass",
+                    "(Ljava/lang/String;)Ljava/lang/Class;",
+                    Self::load_class,
                     MethodAccessFlags::PUBLIC,
                 ),
                 JavaMethodProto::new(
@@ -81,7 +87,7 @@ impl KtfClassLoader {
             .await?;
 
         // load client.bin
-        let name_rust = JavaLangString::to_rust_string(jvm, &binary_name).await.unwrap();
+        let name_rust = JavaLangString::to_rust_string(jvm, &binary_name).await?;
         let data_stream = jvm
             .invoke_virtual(
                 &this,
@@ -90,12 +96,11 @@ impl KtfClassLoader {
                 "(Ljava/lang/String;)Ljava/io/InputStream;",
                 (binary_name,),
             )
-            .await
-            .unwrap();
-        let data = JavaIoInputStream::read_until_end(jvm, &data_stream).await.unwrap();
+            .await?;
+        let data = JavaIoInputStream::read_until_end(jvm, &data_stream).await?;
 
         // load binary
-        let native_functions = load_native(
+        let native_functions = match load_native(
             &mut context.core,
             &mut context.system,
             jvm,
@@ -105,11 +110,47 @@ impl KtfClassLoader {
             ptr_current_jvm_thread_context as _,
         )
         .await
-        .unwrap();
+        {
+            Ok(functions) => functions,
+            Err(error) => return Err(jvm.exception("net/wie/WieError", &format!("Native initialization failed: {error}")).await),
+        };
 
         jvm.put_field(&mut this, "fnGetClass", "I", native_functions.fn_get_class as i32).await?;
 
         Ok(())
+    }
+
+    async fn load_class(
+        jvm: &Jvm,
+        context: &mut ClassLoaderContext,
+        this: ClassInstanceRef<Self>,
+        name: ClassInstanceRef<String>,
+    ) -> JvmResult<ClassInstanceRef<Class>> {
+        let internal_name = JavaLangString::to_rust_string(jvm, &name).await?.replace('.', "/");
+        if jvm.has_class(&internal_name) {
+            return Ok(jvm.resolve_class(&internal_name).await?.java_class().into());
+        }
+
+        // A KTF package can retain classfiles alongside their compiled definitions.
+        // Use the image's exported class when present so native calls, inherited
+        // fields and object identity all refer to the same guest-backed definition.
+        // Arrays still belong to the JVM's ordinary array construction path.
+        if !internal_name.starts_with('[') {
+            let class = Self::find_class(jvm, context, this.clone(), name.clone()).await?;
+            if !class.is_null() {
+                tracing::debug!("KTF loaded exported class {internal_name}");
+                return Ok(class);
+            }
+        }
+
+        jvm.invoke_special(
+            &this,
+            "java/lang/ClassLoader",
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            (name,),
+        )
+        .await
     }
 
     async fn find_class(

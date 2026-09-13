@@ -217,7 +217,13 @@ impl Graphics {
         tracing::debug!("org.kwis.msp.lcdui.Graphics::setFont({this:?}, {font:?})");
 
         let midp_graphics = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
-        let midp_font = Font::midp_font(jvm, &font).await?;
+        // Preserve null through the adapter: MIDP setFont handles it by
+        // restoring its default font. Unwrapping the WIPI wrapper panics.
+        let midp_font = if font.is_null() {
+            None.into()
+        } else {
+            Font::midp_font(jvm, &font).await?
+        };
 
         jvm.invoke_virtual(
             &midp_graphics,
@@ -535,6 +541,10 @@ impl Graphics {
 
         let midp_graphics = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
         let midp_image = Image::midp_image(jvm, &image).await?;
+        // loadImage returns a zero-sized image before deferred decoding finishes.
+        if midp_image.is_null() {
+            return Ok(());
+        }
 
         jvm.invoke_virtual(
             &midp_graphics,
@@ -727,7 +737,8 @@ impl Graphics {
             "javax/microedition/lcdui/Graphics",
             "drawRGB",
             "([IIIIIIIZ)V",
-            (rgb_pixels, offset, bpl, x, y, width, height, true),
+            // WIPI uses 0x00RRGGBB, not MIDP's optional ARGB array format.
+            (rgb_pixels, offset, bpl, x, y, width, height, false),
         )
         .await
     }
@@ -845,22 +856,31 @@ impl Graphics {
         width: i32,
         height: i32,
     ) -> JvmResult<ClassInstanceRef<Array<u8>>> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Graphics::encodeImage({this:?}, {x}, {y}, {width}, {height})");
+        tracing::debug!("org.kwis.msp.lcdui.Graphics::encodeImage({this:?}, {x}, {y}, {width}, {height})");
 
         if width <= 0 || height <= 0 {
-            return Ok(jvm.instantiate_array("B", 0).await?.into());
+            return Ok(None.into());
         }
 
         let w = width as u32;
         let h = height as u32;
 
         // Each BMP row is padded to a multiple of 4 bytes
-        let row_stride = (w * 3).div_ceil(4) * 4; // 24bpp (3 bytes per pixel)
-        let image_size = row_stride * h;
-        let header_size = 14 + 40; // BITMAPFILEHEADER (14) + BITMAPINFOHEADER (40)
-        let file_size = header_size as u32 + image_size;
-
-        let mut result = vec![0u8; file_size as usize];
+        let row_stride = (u64::from(w) * 3).div_ceil(4) * 4;
+        let image_size = row_stride * u64::from(h);
+        let header_size = 14 + 40; // BITMAPFILEHEADER + BITMAPINFOHEADER
+        let file_size = header_size as u64 + image_size;
+        // KTF's API returns null on encoding failure. A Java byte array cannot
+        // represent a BMP exceeding its signed length; reject before allocating.
+        if file_size > i32::MAX as u64 {
+            return Ok(None.into());
+        }
+        let (row_stride, image_size, file_size) = (row_stride as u32, image_size as u32, file_size as u32);
+        let mut result = alloc::vec::Vec::new();
+        if result.try_reserve_exact(file_size as usize).is_err() {
+            return Ok(None.into());
+        }
+        result.resize(file_size as usize, 0u8);
 
         // BITMAPFILEHEADER
         result[0] = b'B';
@@ -882,7 +902,29 @@ impl Graphics {
         result[46..50].copy_from_slice(&(0u32).to_le_bytes()); // colors used
         result[50..54].copy_from_slice(&(0u32).to_le_bytes()); // important colors
 
-        // TODO: fill in pixel data
+        let mut graphics: ClassInstanceRef<MidpGraphics> = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        let image = MidpGraphics::image(jvm, &mut graphics).await?;
+        let image = MidpImage::image(jvm, &image).await?;
+        let tx: i32 = jvm
+            .invoke_virtual(&graphics, "javax/microedition/lcdui/Graphics", "getTranslateX", "()I", ())
+            .await?;
+        let ty: i32 = jvm
+            .invoke_virtual(&graphics, "javax/microedition/lcdui/Graphics", "getTranslateY", "()I", ())
+            .await?;
+        // BMP stores BGR rows bottom-up. Capture the backing pixels without
+        // applying drawing color, alpha, XOR or clipping to this read operation.
+        for row in 0..h {
+            for column in 0..w {
+                let sx = i64::from(x) + i64::from(tx) + i64::from(column);
+                let sy = i64::from(y) + i64::from(ty) + i64::from(row);
+                if sx < 0 || sy < 0 || sx >= i64::from(image.width()) || sy >= i64::from(image.height()) {
+                    continue;
+                }
+                let color = image.get_pixel(sx as i32, sy as i32);
+                let offset = header_size + ((h - 1 - row) * row_stride + column * 3) as usize;
+                result[offset..offset + 3].copy_from_slice(&[color.b, color.g, color.r]);
+            }
+        }
 
         // Return as Java byte array
         let mut data_array = jvm.instantiate_array("B", result.len()).await?;
@@ -921,7 +963,114 @@ mod test {
 
     use crate::{classes::org::kwis::msp::lcdui::Image, get_protos};
 
+    #[test]
+    fn set_rgb_pixels_draws_rgb_without_treating_high_byte_as_alpha() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (4, 4))
+                .await?;
+            let g: ClassInstanceRef<()> = jvm
+                .invoke_virtual(&image, "org/kwis/msp/lcdui/Image", "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ())
+                .await?;
+            let mut pixels = jvm.instantiate_array("I", 6).await?;
+            let original = [99i32, 0x00112233, 0x00445566, 88, 0, 0x7f778899];
+            jvm.store_array(&mut pixels, 0, original).await?;
+            let _: () = jvm
+                .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "setColor", "(I)V", (0xff00ff,))
+                .await?;
+            let _: () = jvm
+                .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "fillRect", "(IIII)V", (0, 0, 4, 4))
+                .await?;
+            let _: () = jvm
+                .invoke_virtual(
+                    &g,
+                    "org/kwis/msp/lcdui/Graphics",
+                    "setRGBPixels",
+                    "(IIII[III)V",
+                    (1, 1, 2, 2, pixels.clone(), 1, 3),
+                )
+                .await?;
+            for (x, y, expected) in [(1, 1, 0x112233), (2, 1, 0x445566), (1, 2, 0), (2, 2, 0x778899), (0, 0, 0xff00ff)] {
+                assert_eq!(
+                    jvm.invoke_virtual::<_, i32>(&g, "org/kwis/msp/lcdui/Graphics", "getPixel", "(II)I", (x, y))
+                        .await?,
+                    expected
+                );
+            }
+            assert_eq!(jvm.load_array::<i32>(&pixels, 0, 6).await?, original);
+            Ok(())
+        })
+    }
+
     use super::Graphics;
+
+    #[test]
+    fn encode_image_captures_translated_pixels_as_padded_bottom_up_bmp() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (4, 4))
+                .await?;
+            let g: ClassInstanceRef<Graphics> = jvm
+                .invoke_virtual(&image, "org/kwis/msp/lcdui/Image", "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ())
+                .await?;
+            let colors = [0x112233, 0x00ff00, 0, 0xff0000, 0x0000ff, 0xffffff];
+            for (i, color) in colors.into_iter().enumerate() {
+                let _: () = jvm
+                    .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "setColor", "(I)V", (color,))
+                    .await?;
+                let _: () = jvm
+                    .invoke_virtual(
+                        &g,
+                        "org/kwis/msp/lcdui/Graphics",
+                        "fillRect",
+                        "(IIII)V",
+                        (1 + i as i32 % 3, 1 + i as i32 / 3, 1, 1),
+                    )
+                    .await?;
+            }
+            let _: () = jvm
+                .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "translate", "(II)V", (1, 1))
+                .await?;
+            let data: ClassInstanceRef<jvm::Array<u8>> = jvm
+                .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "encodeImage", "(IIII)[B", (0, 0, 3, 2))
+                .await?;
+            let mut bytes = [0u8; 78];
+            jvm.array_raw_buffer(&data).await?.read(0, &mut bytes)?;
+            assert_eq!(&bytes[0..2], b"BM");
+            assert_eq!(&bytes[54..66], &[0, 0, 255, 255, 0, 0, 255, 255, 255, 0, 0, 0]);
+            assert_eq!(&bytes[66..78], &[0x33, 0x22, 0x11, 0, 255, 0, 0, 0, 0, 0, 0, 0]);
+            let decoded = wie_backend::canvas::decode_image(&bytes).expect("valid captured BMP");
+            assert_eq!((decoded.width(), decoded.height()), (3, 2));
+            for (i, expected) in colors.into_iter().enumerate() {
+                let c = decoded.get_pixel(i as i32 % 3, i as i32 / 3);
+                assert_eq!(((c.r as i32) << 16) | ((c.g as i32) << 8) | c.b as i32, expected);
+                let actual: i32 = jvm
+                    .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "getPixel", "(II)I", (i as i32 % 3, i as i32 / 3))
+                    .await?;
+                assert_eq!(actual, expected);
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn encode_image_returns_null_when_dimensions_cannot_be_encoded() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (2, 2))
+                .await?;
+            let g: ClassInstanceRef<Graphics> = jvm
+                .invoke_virtual(&image, "org/kwis/msp/lcdui/Image", "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ())
+                .await?;
+            for (width, height) in [(0, 1), (1, 0), (-1, 1), (1, -1), (i32::MAX, 1), (1, i32::MAX), (i32::MAX, i32::MAX)] {
+                let encoded: ClassInstanceRef<jvm::Array<u8>> = jvm
+                    .invoke_virtual(&g, "org/kwis/msp/lcdui/Graphics", "encodeImage", "(IIII)[B", (0, 0, width, height))
+                    .await?;
+                assert!(encoded.is_null());
+            }
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_copy_area() -> Result<()> {
@@ -1191,6 +1340,59 @@ mod test {
                     .await?
             );
 
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod null_font_tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use test_utils::run_jvm_test;
+    use wie_util::Result;
+
+    #[test]
+    fn null_font_restores_default_and_graphics_remains_usable() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), crate::get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (32, 32))
+                .await?;
+            let graphics: ClassInstanceRef<Graphics> = jvm
+                .invoke_virtual(&image, "org/kwis/msp/lcdui/Image", "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ())
+                .await?;
+            let custom: ClassInstanceRef<Font> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Font", "getFont", "(III)Lorg/kwis/msp/lcdui/Font;", (32, 1, 16))
+                .await?;
+            for font in [custom, ClassInstanceRef::from(None)] {
+                let _: () = jvm
+                    .invoke_virtual(
+                        &graphics,
+                        "org/kwis/msp/lcdui/Graphics",
+                        "setFont",
+                        "(Lorg/kwis/msp/lcdui/Font;)V",
+                        (font,),
+                    )
+                    .await?;
+                let current: ClassInstanceRef<Font> = jvm
+                    .invoke_virtual(&graphics, "org/kwis/msp/lcdui/Graphics", "getFont", "()Lorg/kwis/msp/lcdui/Font;", ())
+                    .await?;
+                assert!(!current.is_null());
+                let _: () = jvm
+                    .invoke_virtual(&graphics, "org/kwis/msp/lcdui/Graphics", "drawChar", "(CIII)V", ('A' as u16, 0, 0, 20))
+                    .await?;
+            }
+            let current: ClassInstanceRef<Font> = jvm
+                .invoke_virtual(&graphics, "org/kwis/msp/lcdui/Graphics", "getFont", "()Lorg/kwis/msp/lcdui/Font;", ())
+                .await?;
+            let default: ClassInstanceRef<Font> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Font", "getDefaultFont", "()Lorg/kwis/msp/lcdui/Font;", ())
+                .await?;
+            for method in ["getFace", "getStyle", "getSize"] {
+                let actual: i32 = jvm.invoke_virtual(&current, "org/kwis/msp/lcdui/Font", method, "()I", ()).await?;
+                let expected: i32 = jvm.invoke_virtual(&default, "org/kwis/msp/lcdui/Font", method, "()I", ()).await?;
+                assert_eq!(actual, expected);
+            }
             Ok(())
         })
     }

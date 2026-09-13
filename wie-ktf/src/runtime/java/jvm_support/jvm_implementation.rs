@@ -24,6 +24,13 @@ pub struct KtfJvmImplementation {
 impl KtfJvmImplementation {
     pub fn new(core: &mut ArmCore) -> Self {
         let java_functions = Arc::new(Mutex::new(BTreeMap::new()));
+        let owned_functions = java_functions.clone();
+        core.on_shutdown(move || {
+            // Proxies own the JVM, whose implementation owns this same table.
+            let callbacks = core::mem::take(&mut *owned_functions.lock());
+            drop(callbacks);
+        });
+
         register_java_svc_handler(core, &java_functions).unwrap();
 
         Self {

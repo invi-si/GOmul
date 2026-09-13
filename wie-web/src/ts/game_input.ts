@@ -4,7 +4,18 @@ export interface GameInputSink {
 }
 
 const KEY_MAP: Record<string, string> = {
-  Digit0: "0",
+  Digit0: "1",
+  Minus: "2",
+  Equal: "3",
+  KeyO: "4",
+  KeyP: "5",
+  BracketLeft: "6",
+  KeyL: "7",
+  Semicolon: "8",
+  Quote: "9",
+  Comma: "*",
+  Period: "0",
+  Slash: "#",
   Digit1: "1",
   Digit2: "2",
   Digit3: "3",
@@ -26,11 +37,11 @@ const KEY_MAP: Record<string, string> = {
   Numpad9: "9",
   NumpadMultiply: "*",
   KeyQ: "4",
-  KeyW: "5",
+  KeyW: "UP",
   KeyE: "6",
-  KeyA: "7",
-  KeyS: "8",
-  KeyD: "9",
+  KeyA: "LEFT",
+  KeyS: "DOWN",
+  KeyD: "RIGHT",
   KeyZ: "*",
   KeyX: "0",
   KeyC: "#",
@@ -225,3 +236,7 @@ export const bindGameInput = (root: HTMLElement, sink: GameInputSink) => {
     },
   };
 };
+
+export function directionalGameKey(key:string,numeric:boolean):string {
+  return numeric?({UP:"2",LEFT:"4",RIGHT:"6",DOWN:"8"}[key]??key):key;
+}

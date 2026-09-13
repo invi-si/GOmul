@@ -1,40 +1,75 @@
 # GOmul (고물)
 
-A Korean feature-phone emulator based on [WIE](https://github.com/dlunch/wie) by Inseok Lee (dlunch) and contributors. GOmul adds native Android launcher work, compatibility fixes, CPU experiments, and optional Mac-hosted Android checkpoint controls.
+옛날 한국 피처폰 게임을 다시 실행하기 위한 에뮬레이터입니다. **[dlunch/wie](https://github.com/dlunch/wie)를 기반으로 개발**하며, KTF·LGT·SKT의 게임 실행 환경과 Android·브라우저 사용성을 개선하고 있습니다.
 
-**First release (0.1.0). Bring your own games.** No commercial games, game saves, authentication data bundles, or device snapshots are distributed here. The original MIT copyright and licence remain in [LICENSE](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md).
+> 개발 중인 실험 버전입니다. 통신사와 게임 파일 버전에 따라 동작이 다르며, 모든 게임의 정상 진행이나 엔딩까지의 플레이를 보장하지 않습니다. 게임 파일은 직접 준비해야 합니다.
 
-## What runs where
+[다운로드](https://github.com/invi-si/GOmul/releases) · [빌드 방법](docs/build.md) · [호환성](docs/compatibility.md) · [변경 내역](CHANGELOG.md) · [출처와 라이선스](THIRD_PARTY_NOTICES.md) · [개발 문서](docs/README.md)
 
-- **Native Android ARM64:** game library, JAR/ZIP import, automatic companion-data setup, rotation, virtual controls and silver phone-style UI. Compatibility varies by game; this is not a complete WIPI implementation.
-- **Android Virtual Device on macOS:** the same APK plus an optional local checkpoint helper. The optional helper uses whole-AVD Quick Save/Load and protected startup snapshots. Physical Android has a separate experimental [replay checkpoint implementation](docs/android-checkpoints.md), with slower loads and compatibility limits.
-- **Web / Tauri desktop:** experimental source frontends inherited from WIE and extended in this fork. They do not have the native Android checkpoint integration. Windows release binaries have not been validated locally.
+## 실행 환경
 
-[Build instructions](docs/build.md) · [Local Action Hero setup](docs/action-hero-setup.md) · [Compatibility](docs/compatibility.md) · [Release audit](docs/release-audit.md)
-
-## Development since 0.1.0
-
-The source now includes WIPI timer cancellation correctness, opt-in input/timer diagnostics, deterministic CPU replay and regression tests. See the [performance research index](docs/performance-research.md) for findings, rejected experiments and measurement limits. The refreshed 0.1.0 APK (Android version code 7) includes the timer fix; see the release notes for checkpoint compatibility.
-
-## Tested games
-
-These observations come from private testing with user-supplied copies. Different carrier releases may behave differently.
-
-| Game | Observed status |
+| 환경 | 현재 상태 |
 | --- | --- |
-| Reicarna / 레이카르나 | Playable; heavily exercised during optimization work. |
-| Mini Game Paradise 1 / 미니게임천국1 | Reported working in manual testing. |
-| Mini Game Paradise 2 / 미니게임천국2 | Reported working in manual testing. |
-| Super Action Hero 3 / 슈퍼액션히어로3 (LGT) | Main menu reached with matching emulated phone identity and user-supplied data. Full gameplay not certified. |
-| Gamevil 2010 Pro Baseball / 게임빌2010프로야구 | Fresh-save startup works; existing-save authentication problems remain. |
-| NOM 3 / 놈3 | Boots; reported display flickering still needs confirmation. |
+| Android ARM64 | 네이티브 실행. 게임 목록·가져오기·가상 키패드·저장·오류 보고 기능 제공 |
+| AYN Thor | 상단 화면과 물리 컨트롤 중심의 별도 빌드 옵션 |
+| 브라우저 / WebAssembly | 방문자의 기기에서 게임 실행. 서버가 게임을 대신 에뮬레이션하지 않음 |
+| macOS / Windows / Linux | CLI·Tauri 소스 포함. 플랫폼별 빌드와 검증 범위가 다르며 완성된 공통 배포판을 의미하지 않음 |
 
-[Provenance and attribution](docs/provenance.md) documents offline source/build identifiers and how to interpret matches responsibly.
+브라우저 빌드는 Chromium·데스크톱 WebKit에서 제한된 실행 검증을 했습니다. 실제 iPhone의 성능·전체 게임 호환성은 아직 보장하지 않습니다. 과거 서버 실행형 웹 실험도 소스에 남아 있으므로 [빌드 안내](docs/build.md)의 WASM 경로를 사용하세요.
 
-## Contributing
+## 주요 기능
 
-Report carrier/version, platform, reproduction steps, and whether a fresh save changes the result. Do not attach commercial archives, snapshots, personal phone identities, or memory dumps to public issues. Synthetic reproductions and code fixes are welcome.
+- JAR/ZIP 게임 가져오기, 표지 격자 목록, 검색, 목록으로 돌아올 때 스크롤 위치 유지
+- Android 가상 방향키·숫자 키패드와 물리 컨트롤, 한글 입력
+- Android 게임별 빠른 저장/불러오기 1~3번 슬롯, 저장 초기화, 오류·멈춤 상황의 구조 보고서
+- 게임별 화면 크기·전체 프레임버퍼 보기, 공통 실행 속도 설정(0.25~2배, 최대 3배 실험 옵션)
+- 브라우저의 개인별 IndexedDB 저장과 게임별 저장 백업/가져오기
+- 통신사별 동봉 데이터 가져오기, 글꼴·색상·대화상자·네이티브 API 호환성 수정
+- 취소된 타이머의 중복 실행 방지, 입력 대기열 개선, 결정론적 CPU 재현과 회귀 테스트
 
-General runtime fixes should be proposed upstream as focused changes with regression tests. GOmul-specific launcher and checkpoint work belongs in this fork. There is no affiliation with phone manufacturers, carriers, game publishers, or an endorsement by the WIE author.
+**Android와 브라우저의 기능은 완전히 같지 않습니다.** 브라우저 저장 백업은 게임의 일반 저장 데이터이며 실행 중 메모리를 그대로 되돌리는 빠른 저장이 아닙니다. Android 구조 ZIP·보호된 시작 체크포인트·네이티브 빠른 저장은 브라우저에 모두 이식되지 않았습니다.
 
-Download the Android ARM64 APK from [GOmul 0.1.0 — First Release](https://github.com/invi-si/GOmul/releases/tag/v0.1.0). Standalone replay checkpoints remain experimental; see their [limits and validation](docs/android-checkpoints.md).
+## 사용 방법
+
+### Android
+
+1. [릴리스](https://github.com/invi-si/GOmul/releases)에서 APK를 받거나 직접 빌드합니다.
+2. 게임 목록에서 본인이 준비한 JAR/ZIP 파일을 가져옵니다. 동봉 데이터가 필요한 게임은 그 데이터도 준비합니다.
+3. 설정에서 화면 크기·속도·저장 슬롯을 선택합니다. 게임 항목을 길게 누르면 삭제 또는 저장 초기화를 선택할 수 있습니다.
+4. 화면이 멈추거나 오류가 나면 오류 보고서를 저장해 재현 상황과 함께 제보합니다.
+
+일반 저장과 빠른 저장은 서로 다릅니다. 빠른 저장은 실험적인 재실행 방식이며 에뮬레이터 업데이트 후 이전 슬롯을 읽지 못할 수 있습니다. 업데이트할 때 앱을 삭제하거나 앱 데이터를 지우지 마세요. 일부 게임은 본인이 가진 동봉 데이터와 해당 게임이 요구하는 에뮬레이션 기기 정보가 필요합니다.
+
+### 브라우저
+
+[직접 빌드](docs/build.md)한 웹 페이지에서 게임을 가져옵니다. 저장은 **현재 브라우저·프로필·사이트 주소에 귀속**됩니다. 사이트 데이터 삭제, 시크릿 모드 종료, 주소 변경 전에 ‘저장 백업’을 이용하세요. 사용자 간 저장 데이터는 공유하지 않습니다.
+
+데스크톱 조작은 다음과 같습니다. 기존 보조키는 조작법 메뉴에서 확인할 수 있습니다.
+
+| 키보드 | 게임 입력 |
+| --- | --- |
+| WASD / 방향키 | 이동 |
+| `0 - =` | `1 2 3` |
+| `O P [` | `4 5 6` |
+| `L ; '` | `7 8 9` |
+| `, . /` | `* 0 #` |
+
+## 호환성과 성능
+
+[호환성 문서](docs/compatibility.md)는 통신사별 패키지와 사용자 확인 결과를 구분합니다. 구동 성공은 모든 장면·저장·음악이 검증됐다는 뜻이 아닙니다. 같은 이름의 KTF/LGT 게임도 따로 확인해야 합니다.
+
+FPS를 높이려고 게임 타이머를 임의로 바꾸지 않습니다. 취소 타이머 버그를 수정한 뒤 FPS가 낮아져도 중복 게임 업데이트가 사라진 결과일 수 있습니다. CPU 변경은 정상/효과 장면의 동일한 결정론적 작업에서 상태 일치와 반복 가능한 개선을 확인한 뒤 평가합니다. 최신 호환성 변경에 대해 새로운 FPS 향상을 주장하지 않습니다.
+
+## 출처
+
+- **WIE — Inseok Lee(dlunch)와 기여자:** GOmul의 기반 코드와 원래 Git 이력입니다. MIT 고지를 유지합니다.
+- **W-Feature — movingwoo:** 구조와 기능 책임을 비교하는 참고 프로젝트로 검토했습니다. 저장소 정책에 따라 코드·알고리즘을 복사하지 않고 공개 API 명세를 근거로 독립 구현했습니다. [참고 범위와 구현 결과](docs/references.ko.md)를 확인하세요.
+- arm32_cpu, RustJava, 글꼴·사운드폰트 등 의존성의 저자와 개별 라이선스는 [제3자 고지](THIRD_PARTY_NOTICES.md)에 기록합니다.
+
+GOmul은 휴대폰 제조사·통신사·게임 제작사와 관련이 없으며 원저자의 보증을 의미하지 않습니다. 게임 ROM, 상용 게임 이미지, 개인 저장 파일, 인증 데이터와 기기 스냅샷은 이 저장소와 릴리스에 포함하지 않습니다.
+
+## 버그 제보와 기여
+
+[Issues](https://github.com/invi-si/GOmul/issues)에 기기/OS, 통신사, 게임 버전, 재현 순서와 오류 문구를 남겨 주세요. 앱의 ‘버그제보’ 안내에 따라 오류 보고서를 `v60675605@gmail.com`으로 보낼 수도 있습니다. 보고서에는 게임 메모리와 개인 저장 데이터가 포함될 수 있으므로 내용을 확인하고 공개 이슈에 그대로 첨부하지 마세요.
+
+범용 실행 환경 수정은 테스트와 함께 작은 단위로 제안해 주세요. 기반 WIE에 적용할 수 있는 수정은 별도 변경으로 정리하는 것을 지향합니다. [LICENSE](LICENSE)의 MIT 조건과 각 의존성 고지를 유지합니다.

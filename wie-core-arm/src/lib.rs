@@ -28,7 +28,7 @@ pub type ThreadId = usize;
 pub use engine::{Arm32CpuEngine, ArmEngine, ArmRegister, EngineRunResult, MemoryPermission};
 
 pub use self::{
-    allocator::Allocator,
+    allocator::{Allocator, ListAllocator},
     binary_patches::install_binary_patches,
     context::ArmCoreContext,
     core::{ArmCore, RUN_FUNCTION_LR, RunFunctionResult},

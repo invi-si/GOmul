@@ -1,3 +1,4 @@
+mod bmp;
 mod lbmp;
 mod res;
 
@@ -45,10 +46,20 @@ pub struct Color {
     pub b: u8,
 }
 
+/// Packed native-endian formats that a host can snapshot without color conversion.
+#[derive(Clone, Copy)]
+pub enum PackedPixelFormat {
+    Rgb565,
+    Argb8888,
+}
+
 pub trait Image: Send {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn bytes_per_pixel(&self) -> u32;
+    fn packed_pixel_format(&self) -> Option<PackedPixelFormat> {
+        None
+    }
     fn get_pixel(&self, x: i32, y: i32) -> Color;
     fn raw(&self) -> Cow<'_, [u8]>;
     fn colors(&self) -> Vec<Color>;
@@ -93,6 +104,7 @@ pub trait Canvas: Send {
 
 pub trait PixelType: Send {
     type DataType: Copy + Pod + Num + Send;
+    const PACKED_FORMAT: Option<PackedPixelFormat> = None;
     fn from_color(color: Color) -> Self::DataType;
     fn to_color(raw: Self::DataType) -> Color;
     fn xor_color(raw: Self::DataType, color: Color) -> Self::DataType;
@@ -133,6 +145,7 @@ pub struct Rgb565Pixel;
 
 impl PixelType for Rgb565Pixel {
     type DataType = u16;
+    const PACKED_FORMAT: Option<PackedPixelFormat> = Some(PackedPixelFormat::Rgb565);
 
     fn from_color(color: Color) -> Self::DataType {
         let r = (color.r as u16) >> 3;
@@ -185,6 +198,7 @@ pub struct ArgbPixel;
 
 impl PixelType for ArgbPixel {
     type DataType = u32;
+    const PACKED_FORMAT: Option<PackedPixelFormat> = Some(PackedPixelFormat::Argb8888);
 
     fn from_color(color: Color) -> Self::DataType {
         ((color.a as u32) << 24) | ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32
@@ -271,6 +285,10 @@ where
 
     fn bytes_per_pixel(&self) -> u32 {
         size_of::<T::DataType>() as u32
+    }
+
+    fn packed_pixel_format(&self) -> Option<PackedPixelFormat> {
+        T::PACKED_FORMAT
     }
 
     fn get_pixel(&self, x: i32, y: i32) -> Color {
@@ -644,6 +662,7 @@ where
     }
 
     fn draw_text(&mut self, font: &Font, string: &str, x: i32, y: i32, text_alignment: TextAlignment, color: Color, clip: Clip) {
+        tracing::trace!(target: "guest_text", ?string, x, y, "Guest text draw");
         let size = 10.0; // TODO
         let font = font.0.as_scaled(font.0.pt_to_px_scale(size).unwrap());
 
@@ -662,6 +681,31 @@ where
 
             let glyph = font.scaled_glyph(c);
             let h_advance = font.h_advance(glyph.id);
+
+            // Preserve the font's missing-glyph advance, but make standard
+            // directional instructions readable when the supplied font lacks them.
+            if glyph.id.0 == 0 && matches!(c, '←' | '↑' | '→' | '↓') {
+                let left = x + (position + (h_advance - 7.0) / 2.0) as i32;
+                let top = y + size as i32 - 7;
+                for row in 0..7 {
+                    for column in 0..7 {
+                        let (u, v) = match c {
+                            '←' => (6 - column, row),
+                            '↑' => (6 - row, column),
+                            '↓' => (row, column),
+                            _ => (column, row),
+                        };
+                        let ink = v == 3 || (u >= 3 && (v == u - 3 || v == 9 - u));
+                        let px = left + column;
+                        let py = top + row;
+                        if ink && px >= clip.x && px < clip.x + clip.width as i32 && py >= clip.y && py < clip.y + clip.height as i32 {
+                            self.blend_pixel(px, py, Color { a: 255, ..color });
+                        }
+                    }
+                }
+                position += h_advance;
+                continue;
+            }
 
             if let Some(outlined_glyph) = font.outline_glyph(glyph) {
                 outlined_glyph.draw(|glyph_x: u32, glyph_y, c| {
@@ -920,21 +964,55 @@ impl Clip {
     }
 }
 
+// Some phone games replace PNG palettes in memory without updating PLTE's
+// checksum. Normalize only that checksum in a private copy; the decoder still
+// validates the compressed pixels, other chunk checksums and PNG structure.
+fn png_palette_checksum(data: &[u8]) -> alloc::borrow::Cow<'_, [u8]> {
+    use alloc::borrow::Cow;
+    if !data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Cow::Borrowed(data);
+    }
+    let mut result = Cow::Borrowed(data);
+    let mut offset = 8;
+    while let Some(header) = data.get(offset..).and_then(|remaining| remaining.get(..8)) {
+        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let Some(end) = offset.checked_add(12).and_then(|x| x.checked_add(length)) else {
+            break;
+        };
+        if end > data.len() {
+            break;
+        }
+        if &header[4..] == b"PLTE" && length > 0 && length <= 768 && length.is_multiple_of(3) {
+            let crc = crc32fast::hash(&data[offset + 4..end - 4]).to_be_bytes();
+            if data[end - 4..end] != crc {
+                result.to_mut()[end - 4..end].copy_from_slice(&crc);
+            }
+        }
+        offset = end;
+        if &header[4..] == b"IEND" {
+            break;
+        }
+    }
+    result
+}
+
 pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
     extern crate std; // XXX
 
     use std::io::Cursor;
 
-    if data[0] == b'L' && data[1] == b'B' && data[2] == b'M' && data[3] == b'P' {
+    if data.starts_with(b"LBMP") {
         return decode_lbmp(data);
     }
 
-    let image = ImageReader::new(Cursor::new(&data))
+    let normalized = png_palette_checksum(data);
+    let image = ImageReader::new(Cursor::new(normalized.as_ref()))
         .with_guessed_format()
         .map_err(|x| WieError::FatalError(x.to_string()))?
         .decode()
         .map_err(|x| WieError::FatalError(x.to_string()))?;
-    let rgba = image.into_rgba8();
+    let mut rgba = image.into_rgba8();
+    bmp::apply_palette_mask(data, &mut rgba)?;
 
     let data = rgba.pixels().flat_map(|x| [x.0[2], x.0[1], x.0[0], x.0[3]]).collect::<Vec<_>>();
 
@@ -977,6 +1055,45 @@ mod tests {
     use crate::canvas::{Clip, Image, ImageBuffer, ImageBufferCanvas};
 
     use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, Rgb565Pixel, VecImageBuffer};
+
+    fn indexed_png() -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        for (kind, bytes) in [
+            (*b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0][..]),
+            (*b"PLTE", &[255, 0, 0][..]),
+            (*b"IDAT", &[0x78, 0x01, 0x01, 0x02, 0, 0xfd, 0xff, 0, 0, 0, 2, 0, 1][..]),
+            (*b"IEND", &[][..]),
+        ] {
+            png.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            let start = png.len();
+            png.extend_from_slice(&kind);
+            png.extend_from_slice(bytes);
+            png.extend_from_slice(&crc32fast::hash(&png[start..]).to_be_bytes());
+        }
+        png
+    }
+
+    #[test]
+    fn edited_png_palette_keeps_pixels_without_relaxing_other_checksums() {
+        let original = indexed_png();
+        assert!(matches!(super::png_palette_checksum(&original), Cow::Borrowed(_)));
+        assert_eq!(legacy_rgba(&*super::decode_image(&original).unwrap()), [255, 0, 0, 255]);
+        let mut edited = original.clone();
+        // Palette payload starts after signature, IHDR and PLTE header.
+        edited[41..44].copy_from_slice(&[0, 255, 0]);
+        let unchanged = edited.clone();
+        assert_eq!(legacy_rgba(&*super::decode_image(&edited).unwrap()), [0, 255, 0, 255]);
+        assert_eq!(edited, unchanged);
+        let mut broken = edited.clone();
+        broken[56] ^= 1; // IDAT payload, whose checksum must still fail.
+        assert!(super::decode_image(&broken).is_err());
+        let mut broken = edited.clone();
+        broken[29] ^= 1; // IHDR checksum.
+        assert!(super::decode_image(&broken).is_err());
+        for length in [0, 1, 3, 7, 12, 40, 43, 46, 55] {
+            assert!(super::decode_image(&edited[..length]).is_err());
+        }
+    }
 
     fn legacy_rgba(image: &dyn Image) -> Vec<u8> {
         image

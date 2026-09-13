@@ -1,0 +1,150 @@
+use alloc::vec;
+
+use bytemuck::cast_slice;
+
+use jvm::{Array, ClassInstanceRef, Jvm, Result, runtime::JavaLangString};
+use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
+use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
+
+use crate::{
+    FileOpenOptions, RuntimeClassProto, RuntimeContext,
+    classes::java::io::{File, FileDescriptor},
+};
+
+// class java.io.FileOutputStream
+pub struct FileOutputStream;
+
+impl FileOutputStream {
+    pub fn as_proto() -> RuntimeClassProto {
+        RuntimeClassProto {
+            name: "java/io/FileOutputStream",
+            parent_class: Some("java/io/OutputStream"),
+            interfaces: vec![],
+            methods: vec![
+                JavaMethodProto::new("<init>", "(Ljava/io/File;)V", Self::init, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("<init>", "(Ljava/io/File;Z)V", Self::init_with_append, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new(
+                    "<init>",
+                    "(Ljava/io/FileDescriptor;)V",
+                    Self::init_with_file_descriptor,
+                    MethodAccessFlags::PUBLIC,
+                ),
+                JavaMethodProto::new("write", "([BII)V", Self::write_bytes_offset, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("write", "(I)V", Self::write, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("close", "()V", Self::close, MethodAccessFlags::PUBLIC),
+            ],
+            fields: vec![
+                JavaFieldProto::new("fd", "Ljava/io/FileDescriptor;", FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
+                JavaFieldProto::new("append", "Z", FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
+            ],
+            access_flags: ClassAccessFlags::PUBLIC,
+        }
+    }
+
+    async fn init(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, file: ClassInstanceRef<File>) -> Result<()> {
+        tracing::debug!("java.io.FileOutputStream::<init>({this:?}, {file:?})");
+        jvm.invoke_special(&this, "java/io/FileOutputStream", "<init>", "(Ljava/io/File;Z)V", (file, false))
+            .await
+    }
+
+    async fn init_with_append(
+        jvm: &Jvm,
+        context: &mut RuntimeContext,
+        mut this: ClassInstanceRef<Self>,
+        file: ClassInstanceRef<File>,
+        append: bool,
+    ) -> Result<()> {
+        tracing::debug!("java.io.FileOutputStream::<init>({this:?}, {file:?}, {append})");
+
+        let path = jvm.invoke_virtual(&file, "java/io/File", "getPath", "()Ljava/lang/String;", ()).await?;
+        let path = JavaLangString::to_rust_string(jvm, &path).await?;
+
+        let fd = context
+            .open(
+                &path,
+                FileOpenOptions {
+                    write: true,
+                    append,
+                    truncate: !append,
+                    create: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        if fd.is_err() {
+            return Err(jvm.exception("java/io/FileNotFoundException", "File not found").await);
+        }
+
+        let fd = FileDescriptor::from_fd(jvm, fd.unwrap()).await?;
+        let _: () = jvm.invoke_special(&this, "java/io/OutputStream", "<init>", "()V", ()).await?;
+        jvm.put_field(&mut this, "fd", "Ljava/io/FileDescriptor;", fd).await?;
+        jvm.put_field(&mut this, "append", "Z", append).await
+    }
+
+    async fn init_with_file_descriptor(
+        jvm: &Jvm,
+        _: &mut RuntimeContext,
+        mut this: ClassInstanceRef<Self>,
+        file_descriptor: ClassInstanceRef<FileDescriptor>,
+    ) -> Result<()> {
+        tracing::debug!("java.io.FileOutputStream::<init>({this:?}, {file_descriptor:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/io/OutputStream", "<init>", "()V", ()).await?;
+
+        jvm.put_field(&mut this, "fd", "Ljava/io/FileDescriptor;", file_descriptor).await?;
+        jvm.put_field(&mut this, "append", "Z", false).await?;
+
+        Ok(())
+    }
+
+    async fn write_bytes_offset(
+        jvm: &Jvm,
+        context: &mut RuntimeContext,
+        this: ClassInstanceRef<Self>,
+        buffer: ClassInstanceRef<Array<i8>>,
+        offset: i32,
+        length: i32,
+    ) -> Result<()> {
+        tracing::debug!("java.io.FileOutputStream::write({this:?}, {buffer:?}, {offset:?}, {length:?})");
+
+        let fd = jvm.get_field(&this, "fd", "Ljava/io/FileDescriptor;").await?;
+        let mut file = FileDescriptor::file(jvm, context, fd).await?;
+
+        let mut buf = vec![0; length as _];
+        jvm.array_raw_buffer(&buffer).await?.read(offset as _, &mut buf)?;
+
+        let bytes = cast_slice(&buf);
+        let mut written = 0;
+        while written < bytes.len() {
+            match file.write(&bytes[written..]).await {
+                Ok(0) | Err(_) => return Err(jvm.exception("java/io/IOException", "I/O error").await),
+                Ok(length) if length > bytes.len() - written => return Err(jvm.exception("java/io/IOException", "I/O error").await),
+                Ok(length) => written += length,
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn write(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>, byte: i32) -> Result<()> {
+        tracing::debug!("java.io.FileOutputStream::write({this:?}, {byte:?})");
+
+        let fd = jvm.get_field(&this, "fd", "Ljava/io/FileDescriptor;").await?;
+        let mut file = FileDescriptor::file(jvm, context, fd).await?;
+
+        if !matches!(file.write(&[byte as u8]).await, Ok(1)) {
+            return Err(jvm.exception("java/io/IOException", "I/O error").await);
+        }
+
+        Ok(())
+    }
+
+    async fn close(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<()> {
+        tracing::debug!("java.io.FileOutputStream::close({this:?})");
+
+        let fd = jvm.get_field(&this, "fd", "Ljava/io/FileDescriptor;").await?;
+        FileDescriptor::close(jvm, context, fd).await?;
+
+        Ok(())
+    }
+}

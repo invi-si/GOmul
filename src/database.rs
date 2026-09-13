@@ -101,6 +101,44 @@ impl wie_backend::DatabaseRepository for DatabaseRepository {
         }
     }
 
+    async fn create_directory(&self, name: &str, app_id: &str) -> bool {
+        let root = self.get_path_for_app_databases(app_id);
+        if fs::create_dir_all(&root).is_err() {
+            return false;
+        }
+        let path = self.get_path_for_database(name, app_id);
+        // A file is represented by a database directory with numbered records.
+        // Do not create a guest child inside such a file.
+        if path.parent().is_some_and(|p| p.join("1").is_file()) {
+            return false;
+        }
+        fs::create_dir(path).is_ok()
+    }
+
+    async fn list_directory(&self, name: &str, app_id: &str) -> Option<Vec<String>> {
+        let root = self.get_path_for_app_databases(app_id);
+        let path = if name.trim_matches('/').is_empty() || name == "." {
+            root
+        } else {
+            self.get_path_for_database(name, app_id)
+        };
+        if path.join("1").is_file() {
+            return None;
+        }
+        if !path.exists() && (name.trim_matches('/').is_empty() || name == ".") {
+            return Some(Vec::new());
+        }
+        let mut names = Vec::new();
+        for entry in fs::read_dir(path).ok()? {
+            let entry = entry.ok()?;
+            if entry.file_type().ok()?.is_dir() {
+                names.push(entry.file_name().into_string().ok()?);
+            }
+        }
+        names.sort();
+        Some(names)
+    }
+
     async fn usage(&self, app_id: &str) -> u64 {
         Self::directory_usage(&self.get_path_for_app_databases(app_id))
     }

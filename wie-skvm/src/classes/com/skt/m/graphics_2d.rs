@@ -181,11 +181,6 @@ impl Graphics2D {
             return Ok(());
         }
 
-        if mode == Self::DRAW_AND || mode == Self::DRAW_OR {
-            tracing::warn!("stub com.skt.m.Graphics2D::drawImage unsupported mode {mode}");
-            return Ok(());
-        }
-
         let mut graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "graphics", "Ljavax/microedition/lcdui/Graphics;").await?;
         if graphics.is_null() {
             return Err(jvm.exception("java/lang/NullPointerException", "graphics is null").await);
@@ -199,6 +194,42 @@ impl Graphics2D {
         let image = Graphics::image(jvm, &mut graphics).await?;
         let mut canvas = Image::canvas(jvm, &image).await?;
         canvas.set_xor_mode(mode == Self::DRAW_XOR);
+        if mode == Self::DRAW_AND || mode == Self::DRAW_OR {
+            let dx = i64::from(tx) + i64::from(translate_x);
+            let dy = i64::from(ty) + i64::from(translate_y);
+            let left = 0.max(-i64::from(sx)).max(-dx);
+            let top = 0.max(-i64::from(sy)).max(-dy);
+            let right = i64::from(sw)
+                .min(i64::from(src_image.width()) - i64::from(sx))
+                .min(i64::from(canvas.image().width()) - dx);
+            let bottom = i64::from(sh)
+                .min(i64::from(src_image.height()) - i64::from(sy))
+                .min(i64::from(canvas.image().height()) - dy);
+            for y in top..bottom {
+                for x in left..right {
+                    let source = src_image.get_pixel((i64::from(sx) + x) as i32, (i64::from(sy) + y) as i32);
+                    if source.a == 0 {
+                        continue;
+                    }
+                    let px = (dx + x) as i32;
+                    let py = (dy + y) as i32;
+                    let destination = canvas.get_pixel(px, py).unwrap();
+                    let combine = |a, b| if mode == Self::DRAW_AND { a & b } else { a | b };
+                    canvas.put_pixel(
+                        px,
+                        py,
+                        wie_backend::canvas::Color {
+                            a: destination.a,
+                            r: combine(destination.r, source.r),
+                            g: combine(destination.g, source.g),
+                            b: combine(destination.b, source.b),
+                        },
+                        clip,
+                    );
+                }
+            }
+            return Ok(());
+        }
 
         canvas.draw(
             tx.wrapping_add(translate_x),
@@ -421,6 +452,21 @@ mod test {
                     .invoke_virtual(&source_graphics, "javax/microedition/lcdui/Graphics", "fillRect", "(IIII)V", (1, 0, 1, 1))
                     .await?;
 
+                for (mode, expected) in [(1, 0x020446), (2, 0xabcdef)] {
+                    let _: () = jvm
+                        .invoke_virtual(
+                            &graphics_2d,
+                            "com/skt/m/Graphics2D",
+                            "drawImage",
+                            "(IILjavax/microedition/lcdui/Image;IIIII)V",
+                            (0, 0, source.clone(), 1, 0, 1, 1, mode),
+                        )
+                        .await?;
+                    let pixel: i32 = jvm
+                        .invoke_virtual(&graphics_2d, "com/skt/m/Graphics2D", "getPixel", "(II)I", (0, 0))
+                        .await?;
+                    assert_eq!(pixel, expected);
+                }
                 let copy_mode: i32 = jvm.get_static_field("com/skt/m/Graphics2D", "DRAW_COPY", "I").await?;
                 let xor_mode: i32 = jvm.get_static_field("com/skt/m/Graphics2D", "DRAW_XOR", "I").await?;
                 let _: () = jvm

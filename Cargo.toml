@@ -3,6 +3,7 @@ resolver = "2"
 exclude = ["vendor/arm32_cpu"]
 
 members = [
+    "vendor/rustjava-runtime",
     "wie-app",
     "wie-android",
     "wie-backend",
@@ -23,6 +24,7 @@ members = [
 default-members = ["."]
 
 [patch.crates-io]
+rustjava-runtime = { path = "vendor/rustjava-runtime" }
 jvm = { path = "vendor/jvm" }
 arm32_cpu = { path = "vendor/arm32_cpu" }
 

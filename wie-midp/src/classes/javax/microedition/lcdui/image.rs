@@ -287,6 +287,10 @@ where
         size_of::<T::DataType>() as _
     }
 
+    fn packed_pixel_format(&self) -> Option<wie_backend::canvas::PackedPixelFormat> {
+        T::PACKED_FORMAT
+    }
+
     fn get_pixel(&self, x: i32, y: i32) -> Color {
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 

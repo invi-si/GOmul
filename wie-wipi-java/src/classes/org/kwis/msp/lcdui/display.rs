@@ -5,7 +5,8 @@ use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
 use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
 use rustjava_runtime::classes::java::lang::{Object, Runnable, String};
 
-use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+use wie_backend::Event;
+use wie_jvm_support::{JvmSupport, WieJavaClassProto, WieJvmContext};
 
 use wie_midp::classes::javax::microedition::lcdui::Display as MidpDisplay;
 
@@ -348,14 +349,42 @@ impl Display {
     }
 
     async fn call_serially_with_timeout(
-        _: &Jvm,
-        _: &mut WieJvmContext,
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
         this: ClassInstanceRef<Self>,
         runnable: ClassInstanceRef<Runnable>,
         timeout: i32,
     ) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::callSerially({this:?}, {runnable:?}, {timeout})");
+        tracing::debug!("org.kwis.msp.lcdui.Display::callSerially({this:?}, {runnable:?}, {timeout})");
+        if runnable.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "runnable").await);
+        }
+        if timeout <= 0 {
+            return Self::call_serially(jvm, context, this, runnable).await;
+        }
 
+        let due = context.system().platform().now() + timeout as u64;
+        // Retain the guest objects until delivery; no host copy of their state.
+        let display = jvm.new_global_ref(&this).unwrap();
+        let runnable = jvm.new_global_ref(&runnable).unwrap();
+        let jvm = jvm.clone();
+        context.system().event_queue().push(Event::timer(due, move || async move {
+            // The timer makes the callback eligible; the existing serial queue
+            // invokes it after pending painting, on the UI event thread.
+            let result: JvmResult<()> = jvm
+                .invoke_virtual(
+                    &*display,
+                    "org/kwis/msp/lcdui/Display",
+                    "callSerially",
+                    "(Ljava/lang/Runnable;)V",
+                    ((*runnable).clone(),),
+                )
+                .await;
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(JvmSupport::to_wie_err(&jvm, error).await),
+            }
+        }));
         Ok(())
     }
 
@@ -487,6 +516,110 @@ mod test {
     use wie_util::Result;
 
     use crate::get_protos;
+
+    #[test]
+    fn delayed_serial_callbacks_respect_deadlines_roots_and_event_thread() -> Result<()> {
+        use alloc::vec;
+        use jvm::{Array, ClassInstanceRef, JavaError, Jvm, Result as JvmResult};
+        use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
+        use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
+        use rustjava_runtime::classes::java::lang::Runnable;
+        use test_utils::{TestClock, TestPlatform, run_jvm_test_with_system};
+        use wie_backend::{Event, KeyCode};
+        use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+        use wie_midp::classes::net::wie::EventQueue;
+
+        async fn run(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Runnable>) -> JvmResult<()> {
+            let count: i32 = jvm.get_field(&this, "count", "I").await?;
+            jvm.put_field(&mut this, "count", "I", count + 1).await?;
+            jvm.put_field(&mut this, "thread", "J", context.system().current_task_id() as i64).await
+        }
+        let proto = WieJavaClassProto {
+            name: "test/DelayedCallback",
+            parent_class: Some("java/lang/Object"),
+            interfaces: vec!["java/lang/Runnable"],
+            methods: vec![JavaMethodProto::new("run", "()V", run, MethodAccessFlags::PUBLIC)],
+            fields: vec![
+                JavaFieldProto::new("count", "I", FieldAccessFlags::PUBLIC),
+                JavaFieldProto::new("thread", "J", FieldAccessFlags::PUBLIC),
+            ],
+            access_flags: ClassAccessFlags::PUBLIC,
+        };
+        let clock = TestClock::new();
+        run_jvm_test_with_system(
+            Box::new([wie_midp::get_protos().into(), get_protos().into(), Box::new([proto])]),
+            Box::new(TestPlatform::with_clock(clock.clone())),
+            move |jvm, system| async move {
+                let queue: ClassInstanceRef<EventQueue> = jvm
+                    .invoke_static("net/wie/EventQueue", "getEventQueue", "()Lnet/wie/EventQueue;", ())
+                    .await?;
+                let midp = jvm.instantiate_class("javax/microedition/lcdui/Display").await?;
+                let mut display = jvm.instantiate_class("org/kwis/msp/lcdui/Display").await?;
+                jvm.put_field(&mut display, "midpDisplay", "Ljavax/microedition/lcdui/Display;", midp)
+                    .await?;
+                let runnable: ClassInstanceRef<Runnable> = jvm.instantiate_class("test/DelayedCallback").await?.into();
+                let event: ClassInstanceRef<Array<i32>> = jvm.instantiate_array("I", 4).await?.into();
+                let _event_root = jvm.new_global_ref(&event);
+                let thread = system.current_task_id() as i64;
+                // Two registrations of the same object must both be delivered.
+                for _ in 0..2 {
+                    let _: () = jvm
+                        .invoke_virtual(
+                            &display,
+                            "org/kwis/msp/lcdui/Display",
+                            "callSerially",
+                            "(Ljava/lang/Runnable;I)V",
+                            (runnable.clone(), 100),
+                        )
+                        .await?;
+                }
+                assert_eq!(jvm.get_field::<i32>(&runnable, "count", "I").await?, 0);
+                jvm.collect_garbage()?;
+                for (now, expected) in [(0, 0), (99, 0), (100, 2), (200, 2)] {
+                    clock.set(now);
+                    system.event_queue().push(Event::Keydown(KeyCode::NUM1));
+                    let _: () = jvm
+                        .invoke_virtual(&queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),))
+                        .await?;
+                    assert_eq!(jvm.get_field::<i32>(&runnable, "count", "I").await?, expected);
+                }
+                assert_eq!(jvm.get_field::<i64>(&runnable, "thread", "J").await?, thread);
+                for (delay, expected) in [(-1, 3), (0, 4)] {
+                    let _: () = jvm
+                        .invoke_virtual(
+                            &display,
+                            "org/kwis/msp/lcdui/Display",
+                            "callSerially",
+                            "(Ljava/lang/Runnable;I)V",
+                            (runnable.clone(), delay),
+                        )
+                        .await?;
+                    assert_eq!(
+                        jvm.get_field::<i32>(&runnable, "count", "I").await?,
+                        expected - 1,
+                        "must return before executing runnable"
+                    );
+                    system.event_queue().push(Event::Keydown(KeyCode::NUM1));
+                    let _: () = jvm
+                        .invoke_virtual(&queue, "net/wie/EventQueue", "getNextEvent", "([I)V", (event.clone(),))
+                        .await?;
+                    assert_eq!(jvm.get_field::<i32>(&runnable, "count", "I").await?, expected);
+                }
+                let null: ClassInstanceRef<Runnable> = None.into();
+                let result: JvmResult<()> = jvm
+                    .invoke_virtual(
+                        &display,
+                        "org/kwis/msp/lcdui/Display",
+                        "callSerially",
+                        "(Ljava/lang/Runnable;I)V",
+                        (null, 100),
+                    )
+                    .await;
+                assert!(matches!(result, Err(JavaError::JavaException(e)) if jvm.is_instance(&*e, "java/lang/NullPointerException")));
+                Ok(())
+            },
+        )
+    }
 
     #[test]
     fn test_get_key_code() -> Result<()> {

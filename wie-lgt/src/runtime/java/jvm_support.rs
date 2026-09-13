@@ -461,7 +461,27 @@ mod tests {
             let object_methods = object_definition.vtable_entries(&jvm).await?;
             assert_eq!(object_methods[1].method.as_ref().unwrap().name(), "getClass");
             assert_eq!(object_methods[4].method.as_ref().unwrap().name(), "toString");
+            assert_eq!(object_methods[5].method.as_ref().unwrap().name(), "notify");
             let object: Box<dyn ClassInstance> = jvm.new_class("java/lang/Object", "()V", ()).await.unwrap();
+            assert_eq!(object_methods[7].method.as_ref().unwrap().name(), "wait");
+            assert_eq!(object_methods[7].method.as_ref().unwrap().descriptor(), "(J)V");
+            assert_eq!(object_methods[9].method.as_ref().unwrap().name(), "notifyAll");
+            let receiver = LgtJvmSupport::class_instance_raw(&*object);
+            let notify_all: u32 = read_generic(&core, object_definition.ptr_vtable()? + 10 * 4)?;
+            let wait: u32 = read_generic(&core, object_definition.ptr_vtable()? + 8 * 4)?;
+            // Native dispatch must keep Java monitor ownership checks.
+            assert!(matches!(
+                core.run_function::<()>(notify_all, &[receiver]).await,
+                Err(WieError::JavaException(_))
+            ));
+            jvm.monitor_enter(&object).await.unwrap();
+            core.run_function::<()>(notify_all, &[receiver]).await?;
+            // Both words of the long timeout reach the standard wait implementation.
+            assert!(matches!(
+                core.run_function::<()>(wait, &[receiver, u32::MAX, u32::MAX]).await,
+                Err(WieError::JavaException(_))
+            ));
+            jvm.monitor_exit(&object).await.unwrap();
             let missing_target: u32 = read_generic(&core, object_definition.ptr_vtable()? + 4)?;
             let error = core
                 .run_function::<u32>(missing_target, &[LgtJvmSupport::class_instance_raw(&*object)])
@@ -470,6 +490,42 @@ mod tests {
             match error {
                 WieError::Unimplemented(message) => assert_eq!(message, "java/lang/Object vtable index 0"),
                 error => panic!("unexpected missing vtable error: {error}"),
+            }
+
+            // Native LGT callers use fixed slots, not Java name lookup.
+            let output: Box<dyn ClassInstance> = jvm.new_class("java/io/ByteArrayOutputStream", "()V", ()).await.unwrap();
+            let data_output: Box<dyn ClassInstance> = jvm
+                .new_class("java/io/DataOutputStream", "(Ljava/io/OutputStream;)V", (output.clone(),))
+                .await
+                .unwrap();
+            let data_definition = data_output.class_definition();
+            let data_definition = data_definition.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            let receiver = LgtJvmSupport::class_instance_raw(&*data_output);
+            for (index, argument) in [(15usize, 1u32), (15, 0), (19, 0x12345678), (19, u32::MAX)] {
+                let target: u32 = read_generic(&core, data_definition.ptr_vtable()? + ((index + 1) * 4) as u32)?;
+                core.run_function::<u32>(target, &[receiver, argument]).await?;
+            }
+            let output_definition = output.class_definition();
+            let output_definition = output_definition.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            let to_byte_array: u32 = read_generic(&core, output_definition.ptr_vtable()? + 17 * 4)?;
+            let bytes_raw: u32 = core.run_function(to_byte_array, &[LgtJvmSupport::class_instance_raw(&*output)]).await?;
+            let bytes: Box<dyn ClassInstance> = Box::new(super::JavaArrayClassInstance::from_raw(bytes_raw, &core));
+            assert_eq!(
+                jvm.load_array::<i8>(&bytes, 0, 10).await.unwrap(),
+                vec![1, 0, 0x12, 0x34, 0x56, 0x78, -1, -1, -1, -1]
+            );
+
+            let input: Box<dyn ClassInstance> = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (bytes,)).await.unwrap();
+            let data_input: Box<dyn ClassInstance> = jvm
+                .new_class("java/io/DataInputStream", "(Ljava/io/InputStream;)V", (input,))
+                .await
+                .unwrap();
+            let input_definition = data_input.class_definition();
+            let input_definition = input_definition.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            for (index, expected) in [(22usize, 1u32), (22, 0), (28, 0x12345678), (28, u32::MAX)] {
+                let target: u32 = read_generic(&core, input_definition.ptr_vtable()? + ((index + 1) * 4) as u32)?;
+                let actual: u32 = core.run_function(target, &[LgtJvmSupport::class_instance_raw(&*data_input)]).await?;
+                assert_eq!(actual, expected);
             }
 
             let string_definition = jvm
@@ -491,6 +547,24 @@ mod tests {
                 assert_eq!(target, string_methods[index].method.as_ref().unwrap().target()?);
             }
 
+            let text = JavaLangString::from_rust_string(&jvm, "가|나|다").await.unwrap();
+            let separator = JavaLangString::from_rust_string(&jvm, "|").await.unwrap();
+            let search: u32 = read_generic(&core, string_definition.ptr_vtable()? + 27 * 4)?;
+            for (from, expected) in [(0, 1), (2, 3), (4, u32::MAX)] {
+                assert_eq!(
+                    core.run_function::<u32>(
+                        search,
+                        &[
+                            LgtJvmSupport::class_instance_raw(&*text),
+                            LgtJvmSupport::class_instance_raw(&*separator),
+                            from
+                        ]
+                    )
+                    .await?,
+                    expected
+                );
+            }
+
             let vector_definition = jvm
                 .resolve_class("java/util/Vector")
                 .await
@@ -503,15 +577,48 @@ mod tests {
             let vector_methods = vector_definition.vtable_entries(&jvm).await?;
             for (index, name, descriptor) in [
                 (15usize, "size", "()I"),
+                (19, "indexOf", "(Ljava/lang/Object;)I"),
                 (23, "elementAt", "(I)Ljava/lang/Object;"),
+                (24, "firstElement", "()Ljava/lang/Object;"),
                 (27, "removeElementAt", "(I)V"),
                 (28, "insertElementAt", "(Ljava/lang/Object;I)V"),
+                (29, "addElement", "(Ljava/lang/Object;)V"),
             ] {
                 let method = vector_methods[index].method.as_ref().unwrap();
                 assert_eq!((method.name().as_str(), method.descriptor().as_str()), (name, descriptor));
                 let target: u32 = read_generic(&core, vector_definition.ptr_vtable()? + ((index + 1) * 4) as u32)?;
                 assert_eq!(target, method.target()?);
             }
+
+            let vector: Box<dyn ClassInstance> = jvm.new_class("java/util/Vector", "()V", ()).await.unwrap();
+            let receiver = LgtJvmSupport::class_instance_raw(&*vector);
+            let append: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 30 * 4)?;
+            let size: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 16 * 4)?;
+            let element: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 24 * 4)?;
+            let expected = [LgtJvmSupport::class_instance_raw(&*first), 0, LgtJvmSupport::class_instance_raw(&*first)];
+            for (index, value) in expected.iter().enumerate() {
+                core.run_function::<()>(append, &[receiver, *value]).await?;
+                assert_eq!(core.run_function::<u32>(size, &[receiver]).await?, index as u32 + 1);
+            }
+            for (index, value) in expected.iter().enumerate() {
+                assert_eq!(core.run_function::<u32>(element, &[receiver, index as u32]).await?, *value);
+            }
+            let index_of: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 20 * 4)?;
+            let first_element: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 25 * 4)?;
+            assert_eq!(core.run_function::<u32>(first_element, &[receiver]).await?, expected[0]);
+            assert_eq!(core.run_function::<u32>(index_of, &[receiver, expected[0]]).await?, 0);
+            assert_eq!(core.run_function::<u32>(index_of, &[receiver, 0]).await?, 1);
+            assert_eq!(core.run_function::<u32>(index_of, &[receiver, receiver]).await?, u32::MAX);
+            let remove: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 28 * 4)?;
+            core.run_function::<()>(remove, &[receiver, 0]).await?;
+            assert_eq!(core.run_function::<u32>(first_element, &[receiver]).await?, 0);
+            for _ in 0..2 {
+                core.run_function::<()>(remove, &[receiver, 0]).await?;
+            }
+            assert!(matches!(
+                core.run_function::<u32>(first_element, &[receiver]).await,
+                Err(wie_util::WieError::JavaException(_))
+            ));
 
             let reader_definition = jvm
                 .resolve_class("java/io/Reader")
@@ -550,7 +657,33 @@ mod tests {
             let input = b"lgt-reader-data".iter().map(|value| *value as i8).collect::<Vec<_>>();
             let mut input_array = jvm.instantiate_array("B", input.len()).await.unwrap();
             jvm.store_array(&mut input_array, 0, input.clone()).await.unwrap();
-            let input_stream: Box<dyn ClassInstance> = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (input_array,)).await.unwrap();
+            let input_stream: Box<dyn ClassInstance> = jvm
+                .new_class("java/io/ByteArrayInputStream", "([B)V", (input_array.clone(),))
+                .await
+                .unwrap();
+            let skip_stream: Box<dyn ClassInstance> = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (input_array,)).await.unwrap();
+            let definition = skip_stream.class_definition();
+            let definition = definition.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            let skip: u32 = read_generic(&core, definition.ptr_vtable()? + 14 * 4)?;
+            let receiver = LgtJvmSupport::class_instance_raw(&*skip_stream);
+            struct WideReturn(u32, u32);
+            impl wie_core_arm::RunFunctionResult<WideReturn> for WideReturn {
+                fn get(core: &ArmCore) -> Self {
+                    let registers = core.save_context();
+                    Self(registers.r0, registers.r1)
+                }
+            }
+            // Native LGT long arguments are low/high words after the receiver.
+            // Negative and zero skips must preserve position; a wide positive
+            // count must cap at EOF, not truncate to its low word.
+            for (count, expected) in [(-1i64, 0u32), (0, 0), (3, 3), (1i64 << 32, input.len() as u32 - 4), (1, 0)] {
+                let actual: WideReturn = core.run_function(skip, &[receiver, count as u32, ((count as u64) >> 32) as u32]).await?;
+                assert_eq!((actual.0, actual.1), (expected, 0));
+                if count == 3 {
+                    let next: i32 = jvm.invoke_virtual(&skip_stream, "java/io/InputStream", "read", "()I", ()).await.unwrap();
+                    assert_eq!(next, i32::from(input[3]));
+                }
+            }
             let charset = JavaLangString::from_rust_string(&jvm, "UTF-8").await.unwrap();
             let reader: Box<dyn ClassInstance> = jvm
                 .new_class(
@@ -752,6 +885,17 @@ mod tests {
             let class_object: u32 = core.run_function(descriptor.fn_get_class, &[]).await?;
             assert_eq!(class_object, java_class_raw);
             assert_eq!(static_fields, java_class_instance.ptr_fields()? + 0x14);
+            // Native static-field access tests bit 0x2000 in this word. It must
+            // never contain an implementation's nameBytes object pointer.
+            assert_eq!(read_generic::<u32, _>(&core, class_fields)?, 0);
+            let name_bytes: Box<dyn ClassInstance> = jvm.get_field(&java_class, "nameBytes", "[B").await.unwrap();
+            assert_eq!(
+                read_generic::<u32, _>(&core, class_fields + 4)?,
+                LgtJvmSupport::class_instance_raw(&*name_bytes)
+            );
+            let flags_before = read_generic::<u32, _>(&core, class_fields)?;
+            assert_eq!(flags_before & 0x2000, 0);
+
             assert_eq!(read_generic::<u32, _>(&core, static_fields)?, 0x1234_5678);
             assert_eq!(read_generic::<u32, _>(&core, static_fields + 4)?, 0x9abc_def0);
             assert_eq!(read_generic::<u32, _>(&core, static_fields + 8)?, 0x1234_5678);
@@ -1022,6 +1166,141 @@ mod tests {
             system.tick()?;
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn generated_thread_keeps_host_fields_outside_compiler_storage() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let system_clone = system.clone();
+        system.spawn(async move || {
+            let (jvm, mut core, implementation) = init_jvm(&system_clone).await?;
+            let child = implementation
+                .define_class_rust(
+                    &jvm,
+                    JavaClassProto::<()> {
+                        name: "net/wie/test/SmallCompiledThread",
+                        parent_class: Some("java/lang/Thread"),
+                        interfaces: vec![],
+                        methods: vec![],
+                        fields: vec![],
+                        access_flags: ClassAccessFlags::PUBLIC,
+                    },
+                    Box::new(()),
+                )
+                .await
+                .unwrap();
+            let definition = child.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            let raw: RawJavaClass = read_generic(&core, definition.ptr_raw)?;
+            let mut descriptor: RawJavaClassDescriptor = read_generic(&core, raw.ptr_descriptor)?;
+            descriptor.ptr_vtable = raw.unk1;
+            descriptor.instance_field_word_count = 4;
+            write_generic(&mut core, raw.ptr_descriptor, descriptor)?;
+            let mut instance = JavaClassInstance::new(&mut core, definition)?;
+            let fields = instance.ptr_fields()?;
+            write_generic(&mut core, fields, [0x11223344u32; 4])?;
+            let guard = Allocator::alloc(&mut core, 16)?;
+            write_generic(&mut core, guard, [0x55667788u32; 4])?;
+            let thread = jvm.get_class("java/lang/Thread").unwrap();
+            for name in ["daemon", "started", "alive", "interrupted"] {
+                let field = thread.definition.field(name, "Z", false).unwrap();
+                instance.put_field(&*field, JavaValue::Boolean(true)).unwrap();
+                assert!(matches!(instance.get_field(&*field).unwrap(), JavaValue::Boolean(true)));
+            }
+            let id = thread.definition.field("id", "J", false).unwrap();
+            instance.put_field(&*id, JavaValue::Long(0x123456789abcdef)).unwrap();
+            assert!(matches!(instance.get_field(&*id).unwrap(), JavaValue::Long(0x123456789abcdef)));
+            assert_eq!(read_generic::<[u32; 4], _>(&core, fields)?, [0x11223344; 4]);
+            assert_eq!(read_generic::<[u32; 4], _>(&core, guard)?, [0x55667788; 4]);
+            let cloned = instance.shallow_clone().unwrap();
+            assert!(matches!(cloned.get_field(&*id).unwrap(), JavaValue::Long(0x123456789abcdef)));
+            cloned.destroy();
+            Box::new(instance).destroy();
+            assert_eq!(read_generic::<[u32; 4], _>(&core, guard)?, [0x55667788; 4]);
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        while !done.load(Ordering::Relaxed) {
+            system.tick()?;
+        }
+        Ok(())
+    }
+
+    async fn thread_mark_ran(jvm: &Jvm, _context: &mut (), mut this: ClassInstanceRef<Base>) -> JvmResult<()> {
+        jvm.put_field(&mut this, "ran", "I", 1).await
+    }
+
+    #[test]
+    fn generated_thread_recovers_run_override_at_native_slot() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let system_clone = system.clone();
+
+        system.spawn(async move || {
+            let (jvm, mut core, implementation) = init_jvm(&system_clone).await?;
+            let generated_class = implementation
+                .define_class_rust(
+                    &jvm,
+                    JavaClassProto {
+                        name: "net/wie/test/GeneratedThread",
+                        parent_class: Some("java/lang/Thread"),
+                        interfaces: vec![],
+                        methods: vec![JavaMethodProto::new("run", "()V", thread_mark_ran, MethodAccessFlags::PUBLIC)],
+                        fields: vec![JavaFieldProto::new("ran", "I", FieldAccessFlags::PUBLIC)],
+                        access_flags: ClassAccessFlags::PUBLIC,
+                    },
+                    Box::new(()),
+                )
+                .await
+                .unwrap();
+            let generated_definition = generated_class.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            let raw_class: RawJavaClass = read_generic(&core, generated_definition.ptr_raw)?;
+            let mut descriptor: RawJavaClassDescriptor = read_generic(&core, raw_class.ptr_descriptor)?;
+            let parent_name = "java/lang/Thread";
+            let ptr_parent_name = Allocator::alloc(&mut core, parent_name.len() as u32 + 1)?;
+            write_null_terminated_string_bytes(&mut core, ptr_parent_name, parent_name.as_bytes())?;
+            descriptor.ptr_super_class = ptr_parent_name;
+            descriptor.flags |= LGT_JAVA_CLASS_SUPER_CLASS_IS_NAME;
+            // Model a compiler table with no member metadata: Thread.run is slot 11.
+            let method: RawJavaMethod = read_generic(&core, descriptor.ptr_methods + 4)?;
+            let table = Allocator::alloc(&mut core, 19 * 4)?;
+            core.write_bytes(table, &[0; 19 * 4])?;
+            write_generic(&mut core, table, generated_definition.ptr_raw)?;
+            write_generic(&mut core, table + 12 * 4, method.ptr_method)?;
+            descriptor.ptr_vtable = table;
+            descriptor.vtable_count = 18;
+            descriptor.ptr_methods = 0;
+            write_generic(&mut core, raw_class.ptr_descriptor, descriptor)?;
+
+            let loader: Box<dyn ClassInstance> = jvm
+                .invoke_static("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;", ())
+                .await
+                .unwrap();
+            let generated_classes = Allocator::alloc(&mut core, 2 * size_of::<u32>() as u32)?;
+            write_generic(&mut core, generated_classes, 0u32)?;
+            write_generic(&mut core, generated_classes + size_of::<u32>() as u32, generated_definition.ptr_raw)?;
+            LgtJvmSupport::register_generated_class(&mut core, &jvm, generated_definition.ptr_raw, generated_classes, loader).await?;
+
+            let linked_class = jvm.get_class("net/wie/test/GeneratedThread").unwrap();
+            let linked_definition = linked_class.definition.as_any().downcast_ref::<super::JavaClassDefinition>().unwrap();
+            assert_ne!(linked_definition.descriptor()?.ptr_methods, 0);
+            let instance = jvm.instantiate_class("net/wie/test/GeneratedThread").await.unwrap();
+            let value: i32 = jvm.get_field(&instance, "ran", "I").await.unwrap();
+            assert_eq!(value, 0);
+            jvm.invoke_virtual::<_, ()>(&instance, "java/lang/Thread", "run", "()V", ())
+                .await
+                .unwrap();
+            let value: i32 = jvm.get_field(&instance, "ran", "I").await.unwrap();
+            assert_eq!(value, 1);
+            done_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        while !done.load(Ordering::Relaxed) {
+            system.tick()?;
+        }
         Ok(())
     }
 

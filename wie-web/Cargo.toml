@@ -11,8 +11,8 @@ publish = false
 experimental-thumb-blocks = ["wie-lgt/experimental-thumb-blocks"]
 experimental-pc-local = ["wie-lgt/experimental-pc-local"]
 experimental-thumb-table = ["wie-lgt/experimental-thumb-table"]
-cpu-profiling = ["dep:wie-core-arm", "dep:serde_json", "wie-core-arm/cpu-profiling", "wie-lgt/cpu-profiling"]
-cpu-throughput = ["dep:wie-core-arm", "dep:serde_json", "wie-core-arm/cpu-throughput", "wie-lgt/cpu-throughput"]
+cpu-profiling = ["dep:wie-core-arm", "wie-core-arm/cpu-profiling", "wie-lgt/cpu-profiling"]
+cpu-throughput = ["dep:wie-core-arm", "wie-core-arm/cpu-throughput", "wie-lgt/cpu-throughput"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
@@ -31,7 +31,9 @@ console_error_panic_hook = { version = "^0.1" }
 futures = { version = "^0.3", default-features = false, features = ["alloc"] }
 hashbrown = { version = "^0.17" }
 js-sys = { version = "^0.3" }
-serde_json = { version = "^1", optional = true }
+serde_json = { version = "^1" }
+serde = { version = "^1", default-features = false, features = ["derive", "alloc"] }
+sha2 = { version = "0.10", default-features = false }
 log = { version = "0.4", features = ["release_max_level_warn"] }
 time = { version = "^0.3", features = ["wasm-bindgen"] }
 tracing = { version = "^0.1", features = ["release_max_level_warn"] }
@@ -48,3 +50,6 @@ wie-lgt = { workspace = true }
 wie-skt = { workspace = true }
 wie-j2me = { workspace = true }
 wie-util = { workspace = true }
+
+[dev-dependencies]
+futures = { version = "^0.3", features = ["executor"] }

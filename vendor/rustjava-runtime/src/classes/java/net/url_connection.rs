@@ -1,0 +1,48 @@
+use alloc::vec;
+
+use jvm::{ClassInstanceRef, Jvm, Result};
+use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
+use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
+
+use crate::{
+    RuntimeClassProto, RuntimeContext,
+    classes::java::{io::InputStream, net::URL},
+};
+
+// class java.net.URLConnection
+pub struct URLConnection;
+
+impl URLConnection {
+    pub fn as_proto() -> RuntimeClassProto {
+        RuntimeClassProto {
+            name: "java/net/URLConnection",
+            parent_class: Some("java/lang/Object"),
+            interfaces: vec![],
+            methods: vec![
+                JavaMethodProto::new("<init>", "(Ljava/net/URL;)V", Self::init, MethodAccessFlags::PROTECTED),
+                JavaMethodProto::new(
+                    "getInputStream",
+                    "()Ljava/io/InputStream;",
+                    Self::get_input_stream,
+                    MethodAccessFlags::PUBLIC,
+                ),
+            ],
+            fields: vec![JavaFieldProto::new("url", "Ljava/net/URL;", FieldAccessFlags::PROTECTED)],
+            access_flags: ClassAccessFlags::PUBLIC | ClassAccessFlags::ABSTRACT,
+        }
+    }
+
+    async fn init(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, url: ClassInstanceRef<URL>) -> Result<()> {
+        tracing::debug!("java.net.URLConnection::<init>({this:?}, {url:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        Ok(())
+    }
+
+    async fn get_input_stream(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<ClassInstanceRef<InputStream>> {
+        tracing::debug!("java.net.URLConnection::getInputStream({this:?})");
+
+        Err(jvm.exception("java/net/UnknownServiceException", "unsupported").await)
+    }
+}

@@ -49,6 +49,7 @@ pub(crate) struct ArmCoreInner {
     last_thread_id: ThreadId,
     threads: BTreeMap<ThreadId, ThreadState>,
     svc_handlers: BTreeMap<u32, Arc<Box<dyn RegisteredFunction>>>,
+    shutdown_hooks: Vec<Box<dyn FnOnce() + Send + Sync>>,
     next_stub_address: u32,
     profile: Option<ProfileState>,
     #[cfg(feature = "cpu-profiling")]
@@ -105,6 +106,7 @@ impl ArmCore {
             last_thread_id: 0,
             threads: BTreeMap::new(),
             svc_handlers: BTreeMap::new(),
+            shutdown_hooks: Vec::new(),
             next_stub_address: FUNCTIONS_BASE,
             profile,
             #[cfg(feature = "cpu-profiling")]
@@ -429,13 +431,49 @@ impl ArmCore {
                 #[cfg(feature = "cpu-replay")]
                 {
                     if let Some(result) = crate::cpu_replay::try_record(inner.engine.as_mut(), RUN_FUNCTION_LR, 10_000) {
-                        result?
+                        result
                     } else {
-                        inner.engine.run(RUN_FUNCTION_LR, 10_000)?
+                        inner.engine.run(RUN_FUNCTION_LR, 10_000)
                     }
                 }
                 #[cfg(not(feature = "cpu-replay"))]
-                inner.engine.run(RUN_FUNCTION_LR, 10_000)?
+                inner.engine.run(RUN_FUNCTION_LR, 10_000)
+            };
+
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let cpu = self.save_context();
+                    tracing::error!(
+                        "CPU failure entering {address:#x}: {error}; pc={:#x} lr={:#x} sp={:#x} r0={:#x} r1={:#x} r2={:#x} r3={:#x} r4={:#x} r5={:#x} r6={:#x} r7={:#x} cpsr={:#x}",
+                        cpu.pc,
+                        cpu.lr,
+                        cpu.sp,
+                        cpu.r0,
+                        cpu.r1,
+                        cpu.r2,
+                        cpu.r3,
+                        cpu.r4,
+                        cpu.r5,
+                        cpu.r6,
+                        cpu.r7,
+                        cpu.cpsr
+                    );
+                    if let Ok(stack) = read_generic::<[u32; 32], _>(self, cpu.sp) {
+                        tracing::error!("CPU failure stack at {:#x}: {stack:#x?}", cpu.sp);
+                    }
+                    if tracing::enabled!(tracing::Level::DEBUG) {
+                        for pointer in [cpu.r0, cpu.r1, cpu.r2, cpu.r3, cpu.r4, cpu.r5, cpu.r6, cpu.r7, cpu.r8, cpu.sb, cpu.sl] {
+                            if let Ok(words) = read_generic::<[u32; 8], _>(self, pointer) {
+                                tracing::debug!("CPU failure memory {pointer:#x}: {words:#x?}");
+                                if let Ok(indirect) = read_generic::<[u32; 8], _>(self, words[0]) {
+                                    tracing::debug!("CPU failure memory indirect {:#x}: {indirect:#x?}", words[0]);
+                                }
+                            }
+                        }
+                    }
+                    return Err(error);
+                }
             };
 
             self.sample_profile();
@@ -452,7 +490,15 @@ impl ArmCore {
             );
             match result {
                 EngineRunResult::End => break,
-                EngineRunResult::CountExhausted => YieldFuture::new().await, // yield to allow other tasks to run
+                EngineRunResult::CountExhausted => {
+                    #[cfg(feature = "cpu-boundary-trace")]
+                    if tracing::enabled!(target: "cpu_boundaries", tracing::Level::DEBUG)
+                        && let Ok((pc, lr)) = self.read_pc_lr()
+                    {
+                        tracing::debug!(target: "cpu_boundaries", entry = address, pc, lr, "CPU budget exhausted");
+                    }
+                    YieldFuture::new().await; // yield to allow other tasks to run
+                }
                 EngineRunResult::Svc { category, lr, spsr } => {
                     {
                         let mut inner = self.inner.lock();
@@ -520,6 +566,25 @@ impl ArmCore {
         self.restore_context(&previous_context);
 
         Ok(result)
+    }
+
+    /// Release host callbacks after guest execution has stopped. Handler contexts
+    /// may own this core through the JVM, so normal Arc destruction is not enough.
+    pub fn shutdown(&mut self) {
+        let (handlers, hooks) = {
+            let mut inner = self.inner.lock();
+            (core::mem::take(&mut inner.svc_handlers), core::mem::take(&mut inner.shutdown_hooks))
+        };
+        drop(handlers);
+        for hook in hooks {
+            hook();
+        }
+    }
+
+    /// Host adapters with self-referencing callback tables must release them
+    /// explicitly at session teardown, after execution has stopped.
+    pub fn on_shutdown(&mut self, hook: impl FnOnce() + Send + Sync + 'static) {
+        self.inner.lock().shutdown_hooks.push(Box::new(hook));
     }
 
     pub fn register_svc_handler<F, C, R, P>(&mut self, category: u32, handler: F, context: &C) -> Result<()>
@@ -813,6 +878,10 @@ impl ArmCore {
 }
 
 impl ByteRead for ArmCore {
+    fn read_c_string(&self, address: u32) -> Result<Vec<u8>> {
+        self.inner.lock().engine.mem_read_c_string(address)
+    }
+
     fn read_bytes(&self, address: u32, result: &mut [u8]) -> wie_util::Result<usize> {
         let mut inner = self.inner.lock();
 
@@ -884,6 +953,49 @@ impl Drop for ThreadContextGuard {
 mod tests {
     use super::*;
 
+    struct BytewiseStrings<'a>(&'a ArmCore);
+
+    impl ByteRead for BytewiseStrings<'_> {
+        fn read_bytes(&self, address: u32, result: &mut [u8]) -> Result<usize> {
+            self.0.read_bytes(address, result)
+        }
+    }
+
+    #[test]
+    fn guest_strings_match_bytewise_reader_across_pages_and_mutations() -> Result<()> {
+        use wie_util::read_null_terminated_string_bytes;
+        let mut core = ArmCore::new(false, None)?;
+        core.map(0x10000, 0x20000)?;
+        for address in [0x10001, 0x1fffe, 0x1ffff, 0x20000] {
+            for length in [0, 1, 2, 31, 32, 255] {
+                let mut bytes = (0..length).map(|i| (i % 255 + 1) as u8).collect::<Vec<_>>();
+                bytes.push(0);
+                core.write_bytes(address, &bytes)?;
+                assert_eq!(read_null_terminated_string_bytes(&core, address)?, bytes[..length]);
+                assert_eq!(core.read_c_string(address)?, BytewiseStrings(&core).read_c_string(address)?);
+                core.write_bytes(address, b"changed\0")?;
+                assert_eq!(core.read_c_string(address)?, b"changed");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn guest_string_terminator_does_not_require_next_page() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        core.map(0x10000, 0x10000)?;
+        core.write_bytes(0x1fffc, b"end\0")?;
+        assert_eq!(core.read_c_string(0x1fffc)?, b"end");
+        assert_eq!(core.read_c_string(0x1ffff)?, b"");
+        core.write_bytes(0x1ffff, b"!")?;
+        for result in [core.read_c_string(0x1fffc), BytewiseStrings(&core).read_c_string(0x1fffc)] {
+            assert!(matches!(result, Err(WieError::InvalidMemoryAccess(0x20000))));
+        }
+        assert!(matches!(core.read_c_string(0), Err(WieError::InvalidMemoryAccess(0))));
+        assert!(matches!(core.read_c_string(0x30000), Err(WieError::InvalidMemoryAccess(0x30000))));
+        Ok(())
+    }
+
     #[test]
     fn native_roots_snapshot_image_registers_and_live_stacks() -> Result<()> {
         use wie_util::write_generic;
@@ -915,6 +1027,29 @@ mod tests {
         assert!(!roots.contains(&((HEAP_BASE + 0x100) as usize)));
         assert!(core.native_heap_reference_candidates(0x200000, 4).is_err());
         core.delete_thread_context(1);
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_releases_handlers_that_own_the_cpu() -> Result<()> {
+        async fn handler(_: &mut ArmCore, _: &mut ArmCore, _: crate::SvcId) -> Result<()> {
+            Ok(())
+        }
+        let mut core = ArmCore::new(false, None)?;
+        let weak = alloc::sync::Arc::downgrade(&core.inner);
+        core.register_svc_handler(99, handler, &core.clone())?;
+        assert!(alloc::sync::Arc::strong_count(&core.inner) > 1);
+        let table = alloc::sync::Arc::new(spin::Mutex::new(alloc::vec![core.clone()]));
+        let weak_table = alloc::sync::Arc::downgrade(&table);
+        core.on_shutdown(move || {
+            let entries = core::mem::take(&mut *table.lock());
+            drop(entries);
+        });
+        core.shutdown();
+        core.shutdown();
+        assert!(weak_table.upgrade().is_none());
+        drop(core);
+        assert!(weak.upgrade().is_none());
         Ok(())
     }
 

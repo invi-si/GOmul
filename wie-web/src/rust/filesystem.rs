@@ -1,4 +1,10 @@
-use alloc::{boxed::Box, rc::Rc, string::ToString, vec};
+use alloc::{
+    boxed::Box,
+    format,
+    rc::Rc,
+    string::{String, ToString},
+    vec,
+};
 use core::cell::RefCell;
 use core::cmp::{max, min};
 
@@ -15,6 +21,7 @@ fn make_key(aid: &str, path: &str) -> StoreKey {
 
 pub struct WebFilesystem {
     store: Rc<RefCell<Option<Store>>>,
+    database_name: String,
 }
 
 // single threaded wasm; RefCell + Rc are only touched sequentially.
@@ -22,9 +29,14 @@ unsafe impl Send for WebFilesystem {}
 unsafe impl Sync for WebFilesystem {}
 
 impl WebFilesystem {
-    pub fn new() -> Self {
+    pub fn new(namespace: String) -> Self {
         Self {
             store: Rc::new(RefCell::new(None)),
+            database_name: if namespace.is_empty() {
+                DB_NAME.into()
+            } else {
+                format!("gomul_wasm_fs_{namespace}")
+            },
         }
     }
 
@@ -32,7 +44,7 @@ impl WebFilesystem {
         if let Some(store) = self.store.borrow().as_ref() {
             return store.clone();
         }
-        let store = Store::open(DB_NAME, STORE_NAME).await;
+        let store = Store::open(&self.database_name, STORE_NAME).await;
         *self.store.borrow_mut() = Some(store.clone());
         store
     }
@@ -70,8 +82,7 @@ impl Filesystem for WebFilesystem {
         next[..existing.len()].copy_from_slice(&existing);
         next[offset..offset + data.len()].copy_from_slice(data);
 
-        store.set(key, &next).await;
-        data.len()
+        if store.set(key, &next).await { data.len() } else { 0 }
     }
 
     async fn truncate(&self, aid: &str, path: &str, len: usize) {
@@ -84,5 +95,27 @@ impl Filesystem for WebFilesystem {
         next[..copy_len].copy_from_slice(&existing[..copy_len]);
 
         store.set(key, &next).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sparse_writes_truncation_and_app_isolation() {
+        futures::executor::block_on(async {
+            let fs = WebFilesystem::new("filesystem-test".into());
+            assert_eq!(fs.write("a", "file", 3, &[7]).await, 1);
+            let mut buf = [1; 6];
+            assert_eq!(fs.read("a", "file", 0, 6, &mut buf).await, Some(4));
+            assert_eq!(&buf[..4], &[0, 0, 0, 7]);
+            assert!(!fs.exists("b", "file").await);
+            fs.truncate("a", "file", 6).await;
+            assert_eq!(fs.size("a", "file").await, Some(6));
+            fs.truncate("a", "file", 2).await;
+            assert_eq!(fs.read("a", "file", 2, 6, &mut buf).await, Some(0));
+            assert_eq!(fs.write("a", "empty", 0, &[]).await, 0);
+            assert!(fs.exists("a", "empty").await);
+        });
     }
 }

@@ -22,6 +22,13 @@ pub struct LgtJvmImplementation {
 impl LgtJvmImplementation {
     pub fn new(core: &mut ArmCore) -> Result<Self> {
         let functions = Arc::new(Mutex::new(BTreeMap::new()));
+        let owned_functions = functions.clone();
+        core.on_shutdown(move || {
+            // Proxies own the JVM, whose implementation owns this same table.
+            let callbacks = core::mem::take(&mut *owned_functions.lock());
+            drop(callbacks);
+        });
+
         exception::init(core)?;
         register_java_svc_handler(core, &functions)?;
 

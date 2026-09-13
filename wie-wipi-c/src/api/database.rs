@@ -33,6 +33,7 @@ use crate::context::WIPICContext;
 #[repr(C)]
 struct DatabaseHandle {
     magic: u32,
+    next: u32,
     name: [u8; 32], // TODO hardcoded max size
     read_cursor: u32,
     write_cursor: u32,
@@ -42,7 +43,10 @@ struct DatabaseHandle {
 }
 
 const MIN_BUFFER_CAPACITY: u32 = 64;
-const KTF_DATABASE_STORAGE_LIMIT: u64 = 1024 * 1024;
+// Logical per-application save volume, not the ARM heap or a claim about
+// host free disk. The old 1 MiB profile rejected legitimate multi-MiB installs
+// before the filesystem-backed repository could store their data.
+const KTF_DATABASE_STORAGE_LIMIT: u64 = 32 * 1024 * 1024;
 // "MCDB" — sentinel at the start of the handle struct so we can distinguish
 // a real DB handle pointer from an unrelated guest pointer (e.g. a C-string
 // name pointer that KTF's slot 6 passes through the same SVC argument slot).
@@ -86,7 +90,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
     let initial: Vec<u8> = if exists {
         let mut db = system.platform().database_repository().open(&name, &pid).await;
         if mode == 4 && packaged.is_none() {
-            db.delete(1).await;
+            db.set(1, &[]).await;
             Vec::new()
         } else if let Some(data) = db.get(1).await {
             data
@@ -100,8 +104,11 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
         let mut db = system.platform().database_repository().open(&name, &pid).await;
         db.set(1, &data).await;
         data
-    } else if mode == 4 {
-        system.platform().database_repository().open(&name, &pid).await;
+    } else if matches!(mode, 4 | 8) {
+        let mut db = system.platform().database_repository().open(&name, &pid).await;
+        // LGT open-or-create initializes the stream record. Its callers query
+        // list_record_info immediately and use the size to select first-run setup.
+        db.set(1, &[]).await;
         Vec::new()
     } else {
         Vec::new()
@@ -111,6 +118,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
 
     let mut handle = DatabaseHandle {
         magic: DATABASE_HANDLE_MAGIC,
+        next: context.system().wipi_stream_head(),
         name: [0; 32],
         read_cursor: 0,
         write_cursor: 0,
@@ -131,6 +139,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
 
     let ptr_handle = context.alloc_raw(size_of::<DatabaseHandle>() as _)?;
     write_generic(context, ptr_handle, handle)?;
+    context.system().set_wipi_stream_head(ptr_handle);
 
     tracing::debug!("Created database handle {ptr_handle:#x} for {name}");
 
@@ -144,8 +153,20 @@ pub async fn close_database(context: &mut dyn WIPICContext, db_id: i32) -> Resul
         return Ok(-25); // M_E_INVALIDHANDLE
     };
 
-    // The buffer was kept in sync with disk via write-through on every
-    // `stream_write`, so close just frees the guest-heap allocations.
+    let handles = active_handles(context)?;
+    let Some(index) = handles.iter().position(|(address, _)| *address == db_id as u32) else {
+        return Ok(-25);
+    };
+    if index == 0 {
+        context.system().set_wipi_stream_head(handle.next);
+    } else {
+        let (address, mut previous) = handles[index - 1];
+        previous.next = handle.next;
+        write_generic(context, address, previous)?;
+    }
+    // Invalidate the closed handle before returning its memory to the allocator.
+    write_generic(context, db_id as u32, 0u32)?;
+    // Writes are already persisted; close releases guest allocations.
     if handle.buffer_ptr != 0 && handle.buffer_capacity > 0 {
         context.free_raw(handle.buffer_ptr, handle.buffer_capacity)?;
     }
@@ -177,13 +198,28 @@ pub async fn list_record(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WI
 /// KTF titles use its no-argument return value as an available-storage byte count.
 /// Known callers reject values below 0x100 and 0x1200 respectively.
 pub async fn list_databases(context: &mut dyn WIPICContext) -> Result<i32> {
+    available_database_storage(context, KTF_DATABASE_STORAGE_LIMIT).await
+}
+
+/// Preserve the LGT virtual storage profile independently of KTF's install volume.
+pub async fn available_storage_lgt(context: &mut dyn WIPICContext) -> Result<i32> {
+    available_database_storage(context, 1024 * 1024).await
+}
+
+async fn available_database_storage(context: &mut dyn WIPICContext, capacity: u64) -> Result<i32> {
     let system = context.system();
     let pid = system.pid().to_owned();
     let usage = system.platform().database_repository().usage(&pid).await;
-    let available = KTF_DATABASE_STORAGE_LIMIT.saturating_sub(usage).min(i32::MAX as u64) as i32;
+    let available = capacity.saturating_sub(usage).min(i32::MAX as u64) as i32;
 
-    tracing::debug!("MC_dbListDataBase() = {available} (used={usage}, limit={KTF_DATABASE_STORAGE_LIMIT})");
+    tracing::debug!("MC_dbListDataBase() = {available} (used={usage}, limit={capacity})");
     Ok(available)
+}
+
+/// KTF's filesystem table slot 11 is MC_fsTotalSpace (no arguments).
+/// It reports capacity, unlike slot 12's remaining-space query.
+pub async fn total_space_ktf(_: &mut dyn WIPICContext) -> Result<i32> {
+    Ok(KTF_DATABASE_STORAGE_LIMIT as i32)
 }
 
 pub async fn seek_record_single(context: &mut dyn WIPICContext, db_id: i32, offset: i32, origin: i32) -> Result<i32> {
@@ -365,24 +401,53 @@ pub async fn delete_record(context: &mut dyn WIPICContext, db_id: i32, rec_id: i
     Ok(if ok { 0 } else { -22 })
 }
 
-/// KTF reuses slot 6 with two call shapes that share the same SVC signature:
-///
-///  - standard WIPI: `delete_record(handle, rec_id)`
-///  - KTF custom:    `(name_ptr, type)` — used as a name-keyed cleanup
-///
-/// Both pass two ints, so we disambiguate by reading the magic field at
-/// `a0`. A real handle starts with `DATABASE_HANDLE_MAGIC`; a name pointer
-/// (or anything else) does not, and we fall back to a no-op.
+/// KTF's stream slot 6 is MC_fsRemove(name, accessMode). Preserve the existing
+/// handle/record form for callers using the record API, without treating an
+/// ordinary filename as an open handle.
 pub async fn delete_record_ktf(context: &mut dyn WIPICContext, a0: i32, a1: i32) -> Result<i32> {
-    if load_handle(context, a0)?.is_some() {
+    let handles = active_handles(context)?;
+    if handles.iter().any(|(address, _)| *address == a0 as u32) {
         return delete_record(context, a0, a1).await;
     }
+    if a1 != 1 {
+        return Ok(-24); // M_E_ACCESS: no access to shared/system directories
+    }
+    let bytes = read_null_terminated_string_bytes(context, a0 as u32)?;
+    let Ok(name) = String::from_utf8(bytes) else {
+        return Ok(-3);
+    };
+    if name.len() > MAX_NAME_LEN {
+        return Ok(-11);
+    } // M_E_LONGNAME
+    if name.starts_with('/') || !context.system().filesystem().is_valid_path(&name) {
+        return Ok(-3); // M_E_BADFILENAME
+    }
+    for (_, handle) in handles {
+        let length = handle.name.iter().position(|b| *b == 0).unwrap_or(handle.name.len());
+        if &handle.name[..length] == name.as_bytes() {
+            return Ok(-1); // MC_fsRemove cannot remove an open file
+        }
+    }
+    let system = context.system();
+    let deleted = system.platform().database_repository().delete(&name, system.pid()).await;
+    tracing::debug!("MC_fsRemove({name:?}, {a1}) = {deleted}");
+    Ok(if deleted { 0 } else { -12 })
+}
 
-    // Not a real handle — KTF name-keyed form. No-op preserves saves; the
-    // bytes of a name string would otherwise round-trip into the standard
-    // path and silently delete record 1 of the just-saved DB.
-    tracing::debug!("MC_dbDeleteRecord(name-keyed @ {a0:#x}, {a1}) -> 0 (no-op)");
-    Ok(0)
+fn active_handles(context: &mut dyn WIPICContext) -> Result<Vec<(u32, DatabaseHandle)>> {
+    let mut result: Vec<(u32, DatabaseHandle)> = Vec::new();
+    let mut address = context.system().wipi_stream_head();
+    while address != 0 {
+        if result.iter().any(|(previous, _)| *previous == address) {
+            return Err(wie_util::WieError::FatalError("Cyclic database stream handles".into()));
+        }
+        let Some(handle) = load_handle(context, address as i32)? else {
+            return Err(wie_util::WieError::FatalError("Invalid database stream handle link".into()));
+        };
+        result.push((address, handle));
+        address = handle.next;
+    }
+    Ok(result)
 }
 
 pub async fn delete_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, flags: i32) -> Result<i32> {
@@ -479,38 +544,94 @@ pub async fn stream_read(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WI
     Ok(take as _)
 }
 
-/// KTF custom slot 4 — repurposed from standard `MC_dbSelectRecord` into a
-/// stream-control op `(handle, offset, mode)` that seeks both read/write
-/// cursors. The standard WIPI signature `(db_id, rec_id, buf_ptr, buf_len)`
-/// is not implemented; LGT routes do not use this slot.
-pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_id: i32, mode: WIPICWord, _buf_len: WIPICWord) -> Result<i32> {
-    tracing::debug!("MC_dbSelectRecord({db_id:#x}, {rec_id}, mode={mode:#x}, {_buf_len})");
-
-    let Some(mut handle) = load_handle(context, db_id)? else {
-        return Ok(-25); // M_E_INVALIDHANDLE
-    };
-
-    // KTF reuses slot 4 as a stream-control op `(handle, offset, mode)`. The
-    // shapes observed across games:
-    //
-    //   - `(handle, slot_offset, 0)` — multi-slot save files store each
-    //     slot at a known byte offset within record 1; this seeks both
-    //     cursors so the next read/write hits the right slot while
-    //     preserving the bytes belonging to the other slots.
-    //   - `(handle, 0, 0)` and `(handle, 0, 2)` — rewinds both cursors.
-    //     mode=0 vs 2 isn't a length and isn't truncate (truncating on
-    //     mode=2 on the read path destroys a prefetched buffer during a
-    //     subsequent re-open and wipes the saved record). Both are treated
-    //     as plain seek-and-rewind.
-    if rec_id >= 0 {
-        let offset = rec_id as u32;
-        handle.read_cursor = offset;
-        handle.write_cursor = offset;
-        write_generic(context, db_id as _, handle)?;
-        return Ok(0);
+pub async fn stream_read_ktf(context: &mut dyn WIPICContext, handle: i32, buffer: u32, count: u32) -> Result<i32> {
+    let result = stream_read(context, handle, buffer, count).await?;
+    if result >= 0
+        && let Some(mut state) = load_handle(context, handle)?
+    {
+        state.write_cursor = state.read_cursor;
+        write_generic(context, handle as u32, state)?;
     }
+    Ok(result)
+}
 
-    Ok(-22) // M_E_BADRECID
+pub async fn stream_write_ktf(context: &mut dyn WIPICContext, handle: i32, buffer: u32, count: u32) -> Result<i32> {
+    let result = stream_write(context, handle, buffer, count).await?;
+    if result >= 0
+        && let Some(mut state) = load_handle(context, handle)?
+    {
+        state.read_cursor = state.write_cursor;
+        write_generic(context, handle as u32, state)?;
+    }
+    Ok(result)
+}
+
+/// KTF's stream table follows MC_fs*: slots 8 and 10 operate on directories.
+pub async fn mkdir_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _access: i32) -> Result<i32> {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, name_ptr)?) else {
+        return Ok(-1);
+    };
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    Ok(if system.platform().database_repository().create_directory(&name, &pid).await {
+        0
+    } else {
+        -1
+    })
+}
+
+pub async fn list_directory_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, buf: WIPICWord, capacity: u32, _access: i32) -> Result<i32> {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, name_ptr)?) else {
+        return Ok(-1);
+    };
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let Some(names) = system.platform().database_repository().list_directory(&name, &pid).await else {
+        return Ok(-1);
+    };
+    let required = names.iter().map(|s| s.len() + 1).sum::<usize>() + if names.is_empty() { 2 } else { 1 };
+    if required > capacity as usize {
+        return Ok(-1);
+    }
+    let mut bytes = Vec::with_capacity(required);
+    for name in names {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+    }
+    bytes.resize(required, 0);
+    context.write_bytes(buf, &bytes)?;
+    Ok(0)
+}
+
+/// KTF filesystem slot 4: MC_fsSeek(handle, signed offset, origin).
+/// The cursor and file bytes remain in guest-backed handle storage.
+/// KTF stream-table slot 15: the single-handle position query paired with
+/// slot 4 seek. It must not move either cursor or touch persistent contents.
+pub async fn tell_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-25);
+    };
+    Ok(handle.read_cursor as i32)
+}
+
+pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, offset: i32, origin: WIPICWord) -> Result<i32> {
+    let Some(mut handle) = load_handle(context, db_id)? else {
+        return Ok(-25);
+    };
+    let base = match origin {
+        0 => 0,
+        1 => handle.read_cursor as i64,
+        2 => handle.buffer_len as i64,
+        _ => return Ok(-1),
+    };
+    let position = base + offset as i64;
+    if position < 0 || position > handle.buffer_len as i64 {
+        return Ok(-1);
+    }
+    handle.read_cursor = position as u32;
+    handle.write_cursor = position as u32;
+    write_generic(context, db_id as u32, handle)?;
+    Ok(position as i32)
 }
 
 /// Slot 5 — KTF custom `db_stat_by_name`. From observed call shape:
@@ -537,15 +658,25 @@ pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWor
     let system = context.system();
     let pid = system.pid().to_owned();
     let exists = system.platform().database_repository().exists(&name, &pid).await;
-    if !exists {
-        tracing::debug!("db.stat_by_name({name:?}, mode={mode}) -> -22 (not found)");
-        return Ok(-22);
-    }
-
-    // Pull record 1's size as the "valid save" indicator the game checks
-    // against 0xC7 in v2[2].
-    let db = system.platform().database_repository().open(&name, &pid).await;
-    let record_size = db.get(1).await.map(|x| x.len() as u32).unwrap_or(0);
+    let record_size = if exists {
+        system
+            .platform()
+            .database_repository()
+            .open(&name, &pid)
+            .await
+            .get(1)
+            .await
+            .map(|v| v.len() as u32)
+    } else {
+        None
+    };
+    let record_size = match record_size {
+        Some(size) => size,
+        None => match context.get_resource_size(&name).await? {
+            Some(size) => size as u32,
+            None => return Ok(-22),
+        },
+    };
 
     if out_buf != 0 {
         write_generic(context, out_buf, 0u32)?;
@@ -557,34 +688,10 @@ pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWor
     Ok(0)
 }
 
-/// KTF custom slot 16 — `MC_dbExists(name)`. Observed call shape across
-/// multiple titles is `(name_ptr, 1, size_hint_or_zero, callback_garbage)`.
-/// Titles call it before deciding whether to take the load or fresh-init
-/// path. Returning 1 unconditionally makes them try to load nonexistent
-/// state on first run and trip later, so we read the C string at `a0` and
-/// answer based on the real persisted state.
-pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _arg1: i32, _arg2: i32) -> Result<i32> {
-    let name = match read_null_terminated_string_bytes(context, name_ptr) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, defaulting to 0");
-                return Ok(0);
-            }
-        },
-        Err(_) => {
-            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, defaulting to 0");
-            return Ok(0);
-        }
-    };
-
-    let system = context.system();
-    let pid = system.pid().to_owned();
-    let exists = system.platform().database_repository().exists(&name, &pid).await;
-
-    let result = if exists { 1 } else { 0 };
-    tracing::debug!("MC_dbExists({name:?}) -> {result}");
-    Ok(result)
+/// MC_fsIsExist returns zero on success and a negative error on absence.
+/// It is not a boolean; zero for a missing file takes callers into load paths.
+pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, access: i32) -> Result<i32> {
+    exists_database(context, name_ptr, access).await
 }
 
 /// Read a `DatabaseHandle` from guest memory if `db_id` looks like one.
@@ -640,19 +747,194 @@ mod tests {
 
     use super::{
         KTF_DATABASE_STORAGE_LIMIT, delete_database, exists_database, list_databases, list_record_info, open_database, select_record, stream_read,
-        stream_write, update_record,
+        stream_write, total_space_ktf, update_record,
     };
+
+    #[futures_test::test]
+    async fn ktf_tell_tracks_seek_read_write_without_changing_state() {
+        let mut context = database_test_context();
+        let db = open_test_database(&mut context).await;
+        assert_eq!(super::tell_ktf(&mut context, db).await.unwrap(), 0);
+        context.write_bytes(0x2000, &[10, 20, 30, 40]).unwrap();
+        super::stream_write_ktf(&mut context, db, 0x2000, 4).await.unwrap();
+        assert_eq!(super::tell_ktf(&mut context, db).await.unwrap(), 4);
+        super::select_record_ktf(&mut context, db, -2, 2).await.unwrap();
+        assert_eq!(super::tell_ktf(&mut context, db).await.unwrap(), 2);
+        super::stream_read_ktf(&mut context, db, 0x2100, 1).await.unwrap();
+        let mut before = [0; core::mem::size_of::<super::DatabaseHandle>()];
+        context.read_bytes(db as u32, &mut before).unwrap();
+        assert_eq!(super::tell_ktf(&mut context, db).await.unwrap(), 3);
+        assert_eq!(super::tell_ktf(&mut context, db).await.unwrap(), 3);
+        let mut after = before;
+        context.read_bytes(db as u32, &mut after).unwrap();
+        assert_eq!(before, after);
+        super::select_record_ktf(&mut context, db, 0, 0).await.unwrap();
+        super::stream_read_ktf(&mut context, db, 0x2100, 4).await.unwrap();
+        let mut bytes = [0; 4];
+        context.read_bytes(0x2100, &mut bytes).unwrap();
+        assert_eq!(bytes, [10, 20, 30, 40]);
+        super::close_database(&mut context, db).await.unwrap();
+        assert_eq!(super::tell_ktf(&mut context, db).await.unwrap(), -25);
+        assert_eq!(super::tell_ktf(&mut context, -12).await.unwrap(), -25);
+    }
+
+    #[futures_test::test]
+    async fn ktf_remove_deletes_closed_files_but_preserves_open_or_inaccessible_files() {
+        use crate::WIPICContext;
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"cert.data\0").unwrap();
+        context.write_bytes(0x1100, b"other\0").unwrap();
+        let first = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        let middle = open_database(&mut context, 0x1100, 4, 1).await.unwrap();
+        let last = open_database(&mut context, 0x1000, 1, 1).await.unwrap();
+        context.write_bytes(0x2000, &[1, 2, 3]).unwrap();
+        stream_write(&mut context, first, 0x2000, 3).await.unwrap();
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1000, 2).await.unwrap(), -24);
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1000, 1).await.unwrap(), -1);
+        super::close_database(&mut context, middle).await.unwrap();
+        super::close_database(&mut context, last).await.unwrap();
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1000, 1).await.unwrap(), -1);
+        super::close_database(&mut context, first).await.unwrap();
+        assert_eq!(context.system().wipi_stream_head(), 0);
+        let system = context.system();
+        assert_eq!(
+            system.platform().database_repository().open("cert.data", system.pid()).await.get(1).await,
+            Some(alloc::vec![1, 2, 3])
+        );
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1000, 1).await.unwrap(), 0);
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1000, 1).await.unwrap(), -12);
+        assert_eq!(super::exists_database_ktf(&mut context, 0x1100, 1).await.unwrap(), 0);
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1100, 1).await.unwrap(), 0);
+        context.write_bytes(0x1200, b"../escape\0").unwrap();
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1200, 1).await.unwrap(), -3);
+        context.write_bytes(0x1200, b"abcdefghijklmnopqrstuvwxyz012345\0").unwrap();
+        assert_eq!(super::delete_record_ktf(&mut context, 0x1200, 1).await.unwrap(), -11);
+        // Existing callers using the open-handle/record form retain that contract.
+        let record = open_database(&mut context, 0x1100, 4, 1).await.unwrap();
+        assert_eq!(super::delete_record_ktf(&mut context, record, 1).await.unwrap(), 0);
+        super::close_database(&mut context, record).await.unwrap();
+    }
+
+    #[futures_test::test]
+    async fn ktf_exists_and_shared_file_cursor_obey_filesystem_contract() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+        assert_eq!(super::exists_database_ktf(&mut context, 0x1000, 1).await.unwrap(), -12);
+        let db = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(super::exists_database_ktf(&mut context, 0x1000, 1).await.unwrap(), 0);
+        context.write_bytes(0x2000, &[10, 20, 30, 40]).unwrap();
+        super::stream_write_ktf(&mut context, db, 0x2000, 4).await.unwrap();
+        assert_eq!(super::select_record_ktf(&mut context, db, 0, 1).await.unwrap(), 4);
+        super::select_record_ktf(&mut context, db, 0, 0).await.unwrap();
+        super::stream_read_ktf(&mut context, db, 0x2100, 1).await.unwrap();
+        context.write_bytes(0x2000, &[99]).unwrap();
+        super::stream_write_ktf(&mut context, db, 0x2000, 1).await.unwrap();
+        assert_eq!(super::select_record_ktf(&mut context, db, 0, 1).await.unwrap(), 2);
+        super::select_record_ktf(&mut context, db, 0, 0).await.unwrap();
+        super::stream_read_ktf(&mut context, db, 0x2100, 4).await.unwrap();
+        let mut bytes = [0; 4];
+        context.read_bytes(0x2100, &mut bytes).unwrap();
+        assert_eq!(bytes, [10, 99, 30, 40]);
+        super::stat_by_name_ktf(&mut context, 0x1000, 0x2200, 1, 0).await.unwrap();
+        let size: u32 = wie_util::read_generic(&context, 0x2208).unwrap();
+        assert_eq!(size, 4);
+    }
+
+    #[futures_test::test]
+    async fn ktf_directories_list_names_and_never_overrun_short_buffers() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+        assert_eq!(super::mkdir_ktf(&mut context, 0x1000, 1).await.unwrap(), 0);
+        assert!(super::mkdir_ktf(&mut context, 0x1000, 1).await.unwrap() < 0);
+        context.write_bytes(0x2000, &[0xaa; 32]).unwrap();
+        assert_eq!(super::list_directory_ktf(&mut context, 0x1000, 0x2000, 32, 1).await.unwrap(), 0);
+        let mut bytes = [0; 32];
+        context.read_bytes(0x2000, &mut bytes).unwrap();
+        assert_eq!(&bytes[..3], &[0, 0, 0xaa]);
+        for name in [b"save/a\0".as_slice(), b"save/b\0".as_slice()] {
+            context.write_bytes(0x1100, name).unwrap();
+            let handle = open_database(&mut context, 0x1100, 4, 1).await.unwrap();
+            super::close_database(&mut context, handle).await.unwrap();
+        }
+        context.write_bytes(0x2000, &[0xaa; 32]).unwrap();
+        assert!(super::list_directory_ktf(&mut context, 0x1000, 0x2000, 4, 1).await.unwrap() < 0);
+        context.read_bytes(0x2000, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xaa; 32]);
+        assert_eq!(super::list_directory_ktf(&mut context, 0x1000, 0x2000, 5, 1).await.unwrap(), 0);
+        context.read_bytes(0x2000, &mut bytes).unwrap();
+        assert_eq!(&bytes[..6], b"a\0b\0\0\xaa");
+        assert!(super::list_directory_ktf(&mut context, 0x1100, 0x2000, 32, 1).await.unwrap() < 0);
+    }
+
+    #[futures_test::test]
+    async fn ktf_seek_obeys_origin_returns_position_and_preserves_failed_cursor() {
+        let mut context = database_test_context();
+        let db = open_test_database(&mut context).await;
+        context.write_bytes(0x2000, &[10, 20, 30, 40]).unwrap();
+        stream_write(&mut context, db, 0x2000, 4).await.unwrap();
+        assert_eq!(super::select_record_ktf(&mut context, db, 0, 2).await.unwrap(), 4);
+        assert_eq!(super::select_record_ktf(&mut context, db, -2, 1).await.unwrap(), 2);
+        assert_eq!(super::select_record_ktf(&mut context, db, -1, 2).await.unwrap(), 3);
+        for (offset, origin) in [(0, 3), (-5, 0), (1, 2), (i32::MAX, 1)] {
+            assert!(super::select_record_ktf(&mut context, db, offset, origin).await.unwrap() < 0);
+            assert_eq!(super::select_record_ktf(&mut context, db, 0, 1).await.unwrap(), 3);
+        }
+        assert_eq!(stream_read(&mut context, db, 0x2100, 1).await.unwrap(), 1);
+        let mut byte = [0];
+        context.read_bytes(0x2100, &mut byte).unwrap();
+        assert_eq!(byte, [40]);
+        assert_eq!(super::select_record_ktf(&mut context, db, 1, 0).await.unwrap(), 1);
+        context.write_bytes(0x2000, &[99]).unwrap();
+        stream_write(&mut context, db, 0x2000, 1).await.unwrap();
+        super::close_database(&mut context, db).await.unwrap();
+        let db = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(stream_read(&mut context, db, 0x2100, 4).await.unwrap(), 4);
+        let mut bytes = [0; 4];
+        context.read_bytes(0x2100, &mut bytes).unwrap();
+        assert_eq!(bytes, [10, 99, 30, 40]);
+    }
 
     #[futures_test::test]
     async fn ktf_available_database_storage_tracks_app_usage() {
         let mut context = database_test_context();
         assert_eq!(list_databases(&mut context).await.unwrap(), KTF_DATABASE_STORAGE_LIMIT as i32);
+        assert_eq!(total_space_ktf(&mut context).await.unwrap(), KTF_DATABASE_STORAGE_LIMIT as i32);
 
         let db_id = open_test_database(&mut context).await;
         context.write_bytes(0x2000, &[1, 2, 3, 4]).unwrap();
         assert_eq!(stream_write(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
 
         assert_eq!(list_databases(&mut context).await.unwrap(), KTF_DATABASE_STORAGE_LIMIT as i32 - 4);
+        assert_eq!(total_space_ktf(&mut context).await.unwrap(), KTF_DATABASE_STORAGE_LIMIT as i32);
+    }
+
+    #[futures_test::test]
+    async fn ktf_storage_allows_multi_megabyte_installs_and_reclaims_deleted_data() {
+        use crate::context::WIPICContext;
+        use alloc::borrow::ToOwned;
+        let mut context = database_test_context();
+        let capacity = total_space_ktf(&mut context).await.unwrap();
+        let payload = alloc::vec![0x5a; 3 * 1024 * 1024];
+        assert!(capacity > payload.len() as i32);
+        {
+            let system = context.system();
+            let pid = system.pid().to_owned();
+            let repository = system.platform().database_repository();
+            let mut database = repository.open("installed-data", &pid).await;
+            let id = database.add(&payload).await;
+            assert_eq!(database.get(id).await.unwrap(), payload);
+            // A different application's stores do not consume this budget.
+            let mut other = repository.open("installed-data", "another-app").await;
+            other.add(&payload).await;
+        }
+        assert_eq!(list_databases(&mut context).await.unwrap(), capacity - payload.len() as i32);
+        assert_eq!(total_space_ktf(&mut context).await.unwrap(), capacity);
+        {
+            let system = context.system();
+            let pid = system.pid().to_owned();
+            assert!(system.platform().database_repository().delete("installed-data", &pid).await);
+        }
+        assert_eq!(list_databases(&mut context).await.unwrap(), capacity);
     }
 
     #[futures_test::test]
@@ -665,6 +947,31 @@ mod tests {
         context.write_bytes(0x2000, &[1]).unwrap();
         assert_eq!(stream_write(&mut context, db_id, 0x2000, 1).await.unwrap(), 1);
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
+    }
+
+    #[futures_test::test]
+    async fn lgt_open_or_create_reports_empty_size_and_preserves_written_save() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert!(db_id > 0);
+        context.write_bytes(0x2100, &[0xaa; 16]).unwrap();
+        assert_eq!(list_record_info(&mut context, 0x1000, 0x2100, 1).await.unwrap(), 0);
+        let mut info = [0; 16];
+        context.read_bytes(0x2100, &mut info).unwrap();
+        assert_eq!(&info[..12], &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&info[12..], &[0xaa; 4]);
+        context.write_bytes(0x2000, &[4, 5, 6]).unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 3).await.unwrap(), 3);
+        assert_eq!(super::close_database(&mut context, db_id).await.unwrap(), 0);
+        let reopened = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(list_record_info(&mut context, 0x1000, 0x2100, 1).await.unwrap(), 0);
+        context.read_bytes(0x2100, &mut info).unwrap();
+        assert_eq!(&info[8..12], &3u32.to_le_bytes());
+        assert_eq!(stream_read(&mut context, reopened, 0x2200, 3).await.unwrap(), 3);
+        let mut saved = [0; 3];
+        context.read_bytes(0x2200, &mut saved).unwrap();
+        assert_eq!(saved, [4, 5, 6]);
     }
 
     #[futures_test::test]

@@ -10,6 +10,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -21,13 +22,21 @@ jobs:
         run: echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - name: Unit checks
         run: |
-          cargo test -p wie-wipi-c -p wie-core-arm -p wie-lgt -p wie-ktf
+          cargo fmt --all --check
+          cargo test --workspace --locked
+          cargo test -p wie-core-arm --features experimental-thumb-inline,experimental-thumb-table --locked
+          python3 scripts/release-audit.py
           python3 -m unittest discover -s tools/mac-checkpoints -v
+          python3 -m unittest discover -s tools/compatibility -v
           mkdir -p /tmp/gomul-java-tests
-          javac -d /tmp/gomul-java-tests wie-android/android/app/src/main/java/local/wie/nativeapp/GameDataImport.java wie-android/tests/GameDataImportTest.java
-          java -cp /tmp/gomul-java-tests local.wie.nativeapp.GameDataImportTest
+          javac -d /tmp/gomul-java-tests wie-android/android/app/src/main/java/local/wie/nativeapp/{GameDataImport,GameSaveReset,ControllerState}.java wie-android/tests/*.java
+          for test in GameDataImportTest GameSaveResetTest ControllerStateTest; do
+            java -cp /tmp/gomul-java-tests local.wie.nativeapp.$test
+          done
       - name: Build native APK and notices
-        run: ./wie-android/build.sh
+        run: |
+          ./wie-android/build.sh
+          ./wie-android/android/gradlew -p wie-android/android :app:lintDebug
       - uses: actions/upload-artifact@v4
         with:
           name: GOmul-android-arm64-experimental

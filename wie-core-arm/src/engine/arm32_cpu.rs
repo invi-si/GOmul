@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, vec};
+use alloc::{boxed::Box, format, vec, vec::Vec};
 use core::cell::RefCell;
 
 use arm32_cpu::{Cpu, Memory, Mode, reg};
@@ -274,6 +274,22 @@ impl ArmEngine for Arm32CpuEngine {
         result
     }
 
+    fn mem_read_c_string(&mut self, address: u32) -> Result<Vec<u8>> {
+        #[cfg(feature = "cpu-profiling")]
+        let token = self.profiling.begin(Boundary::HostRead);
+        let result = self.mem.read_c_string(address);
+        #[cfg(feature = "cpu-profiling")]
+        {
+            if self.profiling.mode != ProfileMode::Off {
+                if let Ok(bytes) = &result {
+                    self.profiling.stats.host_read_bytes += bytes.len() as u64 + 1;
+                }
+            }
+            self.profiling.end(Boundary::HostRead, token);
+        }
+        result
+    }
+
     fn is_mapped(&self, address: u32, size: usize) -> bool {
         self.mem.is_mapped(address, size)
     }
@@ -348,6 +364,28 @@ impl EmulatedMemory {
             if page_data.is_none() {
                 *page_data = Some(Box::new([0; PAGE_SIZE]));
             }
+        }
+    }
+
+    fn read_c_string(&self, address: u32) -> Result<Vec<u8>> {
+        if address == 0 {
+            return Err(WieError::InvalidMemoryAccess(address));
+        }
+        let mut result = Vec::with_capacity(20);
+        let mut cursor = address;
+        loop {
+            let page = self.pages[(cursor as usize) / PAGE_SIZE]
+                .as_ref()
+                .ok_or(WieError::InvalidMemoryAccess(cursor))?;
+            // These pages are plain guest RAM. Search only the current mapped
+            // page, so a terminator at its end never requires the next page.
+            let bytes = &page[(cursor & PAGE_MASK) as usize..];
+            if let Some(end) = bytes.iter().position(|byte| *byte == 0) {
+                result.extend_from_slice(&bytes[..end]);
+                return Ok(result);
+            }
+            result.extend_from_slice(bytes);
+            cursor = cursor.checked_add(bytes.len() as u32).ok_or(WieError::InvalidMemoryAccess(0))?;
         }
     }
 

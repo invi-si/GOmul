@@ -22,7 +22,7 @@ let midiVolume = 0.5;
 let pcmVolume = 0.5;
 let audioReady: Promise<AudioState | null> | undefined;
 
-async function initAudio(ctx: AudioContext): Promise<AudioState> {
+export async function initAudio(ctx: AudioContext): Promise<AudioState> {
   const midiGain = ctx.createGain();
   midiGain.gain.value = midiVolume;
   midiGain.connect(ctx.destination);
@@ -34,12 +34,16 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
   let synth: WorkletSynthesizer | null = null;
   try {
     await ctx.audioWorklet.addModule("/spessasynth_processor.min.js");
+    const response = await fetch("GeneralUser.sf3");
+    if (!response.ok) throw new Error(`Soundfont download failed: HTTP ${response.status}`);
+    const buffer = await response.arrayBuffer();
     synth = new WorkletSynthesizer(ctx);
-    const buffer = await fetch("GeneralUser.sf3").then(response => response.arrayBuffer());
     await synth.soundBankManager.addSoundBank(buffer, "main");
     await synth.isReady;
     synth.connect(midiGain);
   } catch (error) {
+    synth?.destroy();
+    synth = null;
     console.warn("MIDI output is unavailable:", error);
   }
 
@@ -83,9 +87,22 @@ export class AudioPlayer {
     });
   private commands: Promise<void> = Promise.resolve();
   private disposed = false;
+  private readonly gestureListeners = new AbortController();
 
   constructor() {
     audioReady = this.audioReady;
+    // Safari may suspend contexts created after the archive download. Resume
+    // directly inside a later trusted gesture, not after another async boundary.
+    const resume = () => {
+      if (this.ctx?.state !== "suspended") return;
+      void this.ctx.resume().then(() => this.audioReady).then(state => {
+        if (!state || this.disposed) return;
+        state.clockAudioTime = state.ctx.currentTime;
+        state.clockPerformanceTime = performance.timeOrigin + performance.now();
+      }).catch(error => console.warn("Audio resume failed:", error));
+    };
+    document.addEventListener("pointerdown", resume, {signal: this.gestureListeners.signal});
+    document.addEventListener("keydown", resume, {signal: this.gestureListeners.signal});
     this.worker.onmessage = (message: MessageEvent<WorkerOutput>) => {
       void this.audioReady.then(state => {
         if (!state || this.disposed) return;
@@ -175,6 +192,7 @@ export class AudioPlayer {
 
   public dispose(): void {
     this.disposed = true;
+    this.gestureListeners.abort();
     this.worker.terminate();
     if (audioReady === this.audioReady) audioReady = undefined;
     void this.ctx?.close().catch(error => console.warn("Failed to close audio context:", error));

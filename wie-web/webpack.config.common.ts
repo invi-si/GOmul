@@ -61,13 +61,16 @@ const commonConfig = (mode: "development" | "production"): webpack.Configuration
   context: import.meta.dirname,
   output: {
     path: path.resolve(import.meta.dirname, "dist"),
-    clean: true,
+    // Open tabs may still request chunks from the previous local build.
+    clean: { keep: asset => /\.wasm$|^assets\/(js|css|font)\//.test(asset) },
   },
   ignoreWarnings: [
     /"global" has been used, it will be undefined in next major version./,
   ],
   resolve: {
     alias: {
+      // The Rust import and worker shutdown must share one pending-write tracker.
+      "indexed_db_store$": path.resolve(import.meta.dirname, "src/ts/indexed_db_store.ts"),
       "@css": path.resolve(import.meta.dirname, "src/css"),
       "@ts": path.resolve(import.meta.dirname, "src/ts"),
     },
@@ -116,6 +119,7 @@ const commonConfig = (mode: "development" | "production"): webpack.Configuration
     }),
     new HtmlBundlerPlugin({
       entry: {
+        catalog: { import: "src/html/catalog.html", data: { adtest: mode !== "production" } },
         index: {
           import: "src/html/index.html",
           data: { adtest: mode !== "production" },

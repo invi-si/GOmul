@@ -1,3 +1,5 @@
+mod message;
+pub use message::Message;
 mod network;
 mod scheme_not_found_exception;
 mod socket;

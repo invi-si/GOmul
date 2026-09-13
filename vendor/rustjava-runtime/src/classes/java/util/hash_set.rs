@@ -1,0 +1,180 @@
+use alloc::vec;
+
+use jvm::{Array, ClassInstanceRef, Jvm, Result};
+use jvm_class_proto::{JavaFieldProto, JavaMethodProto};
+use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
+
+use crate::{RuntimeClassProto, RuntimeContext, classes::java::lang::Object};
+
+use super::HashMap;
+
+const DEFAULT_INITIAL_CAPACITY: i32 = 16;
+
+// class java.util.HashSet
+pub struct HashSet;
+
+impl HashSet {
+    pub fn as_proto() -> RuntimeClassProto {
+        RuntimeClassProto {
+            name: "java/util/HashSet",
+            parent_class: Some("java/util/AbstractSet"),
+            interfaces: vec!["java/lang/Cloneable", "java/io/Serializable"],
+            methods: vec![
+                JavaMethodProto::new("<init>", "()V", Self::init, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("<init>", "(I)V", Self::init_with_capacity, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new(
+                    "<init>",
+                    "(Ljava/util/Collection;)V",
+                    Self::init_from_collection,
+                    MethodAccessFlags::PUBLIC,
+                ),
+                JavaMethodProto::new("add", "(Ljava/lang/Object;)Z", Self::add, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("remove", "(Ljava/lang/Object;)Z", Self::remove, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("contains", "(Ljava/lang/Object;)Z", Self::contains, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("size", "()I", Self::size, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("isEmpty", "()Z", Self::is_empty, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("clear", "()V", Self::clear, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("iterator", "()Ljava/util/Iterator;", Self::iterator, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("toArray", "()[Ljava/lang/Object;", Self::to_array, MethodAccessFlags::PUBLIC),
+            ],
+            fields: vec![
+                JavaFieldProto::new("map", "Ljava/util/HashMap;", FieldAccessFlags::TRANSIENT),
+                JavaFieldProto::new("present", "Ljava/lang/Object;", FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
+            ],
+            access_flags: ClassAccessFlags::PUBLIC,
+        }
+    }
+
+    async fn init(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<()> {
+        tracing::debug!("java.util.HashSet::<init>({this:?})");
+
+        let _: () = jvm
+            .invoke_special(&this, "java/util/HashSet", "<init>", "(I)V", (DEFAULT_INITIAL_CAPACITY,))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn init_with_capacity(jvm: &Jvm, _: &mut RuntimeContext, mut this: ClassInstanceRef<Self>, capacity: i32) -> Result<()> {
+        tracing::debug!("java.util.HashSet::<init>({this:?}, {capacity:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/util/AbstractSet", "<init>", "()V", ()).await?;
+
+        let map: ClassInstanceRef<HashMap> = jvm.new_class("java/util/HashMap", "(I)V", (capacity,)).await?.into();
+        let present: ClassInstanceRef<Object> = jvm.new_class("java/lang/Object", "()V", ()).await?.into();
+
+        jvm.put_field(&mut this, "map", "Ljava/util/HashMap;", map).await?;
+        jvm.put_field(&mut this, "present", "Ljava/lang/Object;", present).await?;
+
+        Ok(())
+    }
+
+    async fn init_from_collection(
+        jvm: &Jvm,
+        _: &mut RuntimeContext,
+        this: ClassInstanceRef<Self>,
+        collection: ClassInstanceRef<Object>,
+    ) -> Result<()> {
+        tracing::debug!("java.util.HashSet::<init>({this:?}, {collection:?})");
+
+        if collection.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "collection").await);
+        }
+        let size: i32 = jvm
+            .invoke_virtual(&collection, &collection.class_definition().name(), "size", "()I", ())
+            .await?;
+        let capacity = size.saturating_mul(2).max(DEFAULT_INITIAL_CAPACITY);
+        let _: () = jvm.invoke_special(&this, "java/util/HashSet", "<init>", "(I)V", (capacity,)).await?;
+        let _: bool = jvm
+            .invoke_virtual(&this, "java/util/HashSet", "addAll", "(Ljava/util/Collection;)Z", (collection,))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn add(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, element: ClassInstanceRef<Object>) -> Result<bool> {
+        tracing::debug!("java.util.HashSet::add({this:?}, {element:?})");
+
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(&this, "map", "Ljava/util/HashMap;").await?;
+        let present: ClassInstanceRef<Object> = jvm.get_field(&this, "present", "Ljava/lang/Object;").await?;
+        let old: ClassInstanceRef<Object> = jvm
+            .invoke_virtual(
+                &map,
+                "java/util/HashMap",
+                "put",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                (element, present),
+            )
+            .await?;
+
+        Ok(old.is_null())
+    }
+
+    async fn remove(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, element: ClassInstanceRef<Object>) -> Result<bool> {
+        tracing::debug!("java.util.HashSet::remove({this:?}, {element:?})");
+
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(&this, "map", "Ljava/util/HashMap;").await?;
+        let old: ClassInstanceRef<Object> = jvm
+            .invoke_virtual(&map, "java/util/HashMap", "remove", "(Ljava/lang/Object;)Ljava/lang/Object;", (element,))
+            .await?;
+
+        Ok(!old.is_null())
+    }
+
+    async fn contains(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, element: ClassInstanceRef<Object>) -> Result<bool> {
+        tracing::debug!("java.util.HashSet::contains({this:?}, {element:?})");
+
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(&this, "map", "Ljava/util/HashMap;").await?;
+
+        jvm.invoke_virtual(&map, "java/util/HashMap", "containsKey", "(Ljava/lang/Object;)Z", (element,))
+            .await
+    }
+
+    async fn size(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<i32> {
+        tracing::debug!("java.util.HashSet::size({this:?})");
+
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(&this, "map", "Ljava/util/HashMap;").await?;
+
+        jvm.invoke_virtual(&map, "java/util/HashMap", "size", "()I", ()).await
+    }
+
+    async fn is_empty(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<bool> {
+        tracing::debug!("java.util.HashSet::isEmpty({this:?})");
+
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(&this, "map", "Ljava/util/HashMap;").await?;
+
+        jvm.invoke_virtual(&map, "java/util/HashMap", "isEmpty", "()Z", ()).await
+    }
+
+    async fn clear(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<()> {
+        tracing::debug!("java.util.HashSet::clear({this:?})");
+
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(&this, "map", "Ljava/util/HashMap;").await?;
+
+        jvm.invoke_virtual(&map, "java/util/HashMap", "clear", "()V", ()).await
+    }
+
+    async fn iterator(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<ClassInstanceRef<Object>> {
+        tracing::debug!("java.util.HashSet::iterator({this:?})");
+
+        let key_set = Self::key_set(jvm, &this).await?;
+
+        jvm.invoke_virtual(&key_set, &key_set.class_definition().name(), "iterator", "()Ljava/util/Iterator;", ())
+            .await
+    }
+
+    async fn to_array(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<ClassInstanceRef<Array<Object>>> {
+        tracing::debug!("java.util.HashSet::toArray({this:?})");
+
+        let key_set = Self::key_set(jvm, &this).await?;
+
+        jvm.invoke_virtual(&key_set, &key_set.class_definition().name(), "toArray", "()[Ljava/lang/Object;", ())
+            .await
+    }
+
+    async fn key_set(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> Result<ClassInstanceRef<Object>> {
+        let map: ClassInstanceRef<HashMap> = jvm.get_field(this, "map", "Ljava/util/HashMap;").await?;
+
+        jvm.invoke_virtual(&map, "java/util/HashMap", "keySet", "()Ljava/util/Set;", ()).await
+    }
+}

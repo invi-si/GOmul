@@ -9,6 +9,9 @@ vtable = [
     { name = "getClass", descriptor = "()Ljava/lang/Class;", index = 1 },
     { name = "equals", descriptor = "(Ljava/lang/Object;)Z", index = 3 },
     { name = "toString", descriptor = "()Ljava/lang/String;", index = 4 },
+    { name = "notify", descriptor = "()V", index = 5 },
+    { name = "wait", descriptor = "(J)V", index = 7 },
+    { name = "notifyAll", descriptor = "()V", index = 9 },
 ]
 
 [[class]]
@@ -16,7 +19,12 @@ name = "java/lang/Class"
 vtable = [
     { name = "getResourceAsStream", descriptor = "(Ljava/lang/String;)Ljava/io/InputStream;", index = 16 },
 ]
+# Word zero is the native class flags (AOT tests bit 0x2000). Keep
+# implementation-only references in the unused words of the five-word prefix.
 field = [
+    { name = "nativeClassFlags", descriptor = "I", index = 0 },
+    { name = "nameBytes", descriptor = "[B", index = 1 },
+    { name = "classLoader", descriptor = "Ljava/lang/ClassLoader;", index = 3 },
     { name = "nativeClassName", descriptor = "I", index = 2 },
     { name = "initializationState", descriptor = "I", index = 4 },
 ]
@@ -27,6 +35,7 @@ vtable = [
     { name = "read", descriptor = "()I", index = 10 },
     { name = "read", descriptor = "([B)I", index = 11 },
     { name = "read", descriptor = "([BII)I", index = 12 },
+    { name = "skip", descriptor = "(J)J", index = 13 },
     { name = "available", descriptor = "()I", index = 14 },
     { name = "close", descriptor = "()V", index = 15 },
 ]
@@ -41,7 +50,11 @@ vtable = [
 [[class]]
 name = "java/io/DataInputStream"
 vtable = [
+    { name = "readBoolean", descriptor = "()Z", index = 22 },
     { name = "readByte", descriptor = "()B", index = 23 },
+    { name = "readShort", descriptor = "()S", index = 25 },
+    { name = "readInt", descriptor = "()I", index = 28 },
+    { name = "readUTF", descriptor = "()Ljava/lang/String;", index = 32 },
 ]
 
 [[class]]
@@ -50,6 +63,9 @@ vtable = [
     { name = "length", descriptor = "()I", index = 10 },
     { name = "charAt", descriptor = "(I)C", index = 11 },
     { name = "getBytes", descriptor = "()[B", index = 14 },
+    { name = "indexOf", descriptor = "(I)I", index = 21 },
+    { name = "indexOf", descriptor = "(Ljava/lang/String;I)I", index = 26 },
+    { name = "substring", descriptor = "(I)Ljava/lang/String;", index = 27 },
     { name = "substring", descriptor = "(II)Ljava/lang/String;", index = 28 },
     { name = "trim", descriptor = "()Ljava/lang/String;", index = 33 },
     { name = "toCharArray", descriptor = "()[C", index = 34 },
@@ -58,8 +74,11 @@ vtable = [
 [[class]]
 name = "java/lang/StringBuffer"
 vtable = [
+    { name = "length", descriptor = "()I", index = 10 },
+    { name = "setLength", descriptor = "(I)V", index = 13 },
     { name = "append", descriptor = "(Ljava/lang/Object;)Ljava/lang/StringBuffer;", index = 17 },
     { name = "append", descriptor = "(Ljava/lang/String;)Ljava/lang/StringBuffer;", index = 18 },
+    { name = "append", descriptor = "(C)Ljava/lang/StringBuffer;", index = 22 },
     { name = "append", descriptor = "(I)Ljava/lang/StringBuffer;", index = 23 },
     { name = "delete", descriptor = "(II)Ljava/lang/StringBuffer;", index = 27 },
 ]
@@ -74,6 +93,7 @@ vtable = [
 name = "java/lang/Thread"
 vtable = [
     { name = "start", descriptor = "()V", index = 10 },
+    { name = "run", descriptor = "()V", index = 11 },
     { name = "isAlive", descriptor = "()Z", index = 13 },
     { name = "setPriority", descriptor = "(I)V", index = 14 },
 ]
@@ -82,9 +102,12 @@ vtable = [
 name = "java/util/Vector"
 vtable = [
     { name = "size", descriptor = "()I", index = 15 },
+    { name = "indexOf", descriptor = "(Ljava/lang/Object;)I", index = 19 },
     { name = "elementAt", descriptor = "(I)Ljava/lang/Object;", index = 23 },
+    { name = "firstElement", descriptor = "()Ljava/lang/Object;", index = 24 },
     { name = "removeElementAt", descriptor = "(I)V", index = 27 },
     { name = "insertElementAt", descriptor = "(Ljava/lang/Object;I)V", index = 28 },
+    { name = "addElement", descriptor = "(Ljava/lang/Object;)V", index = 29 },
 ]
 
 [[class]]
@@ -96,6 +119,7 @@ vtable = [
 [[class]]
 name = "java/util/Random"
 vtable = [
+    { name = "setSeed", descriptor = "(J)V", index = 10 },
     { name = "nextInt", descriptor = "()I", index = 12 },
 ]
 
@@ -119,4 +143,24 @@ vtable = [
 name = "java/util/Calendar"
 vtable = [
     { name = "get", descriptor = "(I)I", index = 19 },
+]
+
+[[class]]
+name = "java/lang/Runtime"
+vtable = [
+    { name = "gc", descriptor = "()V", index = 12 },
+    { name = "gc", descriptor = "()V", index = 13 },
+]
+
+[[class]]
+name = "java/io/DataOutputStream"
+vtable = [
+    { name = "writeBoolean", descriptor = "(Z)V", index = 15 },
+    { name = "writeInt", descriptor = "(I)V", index = 19 },
+]
+
+[[class]]
+name = "java/io/ByteArrayOutputStream"
+vtable = [
+    { name = "toByteArray", descriptor = "()[B", index = 16 },
 ]

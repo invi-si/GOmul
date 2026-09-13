@@ -16,6 +16,7 @@ pub fn register_stdlib_svc_handler(core: &mut ArmCore, system: &System) -> Resul
         match id.0 {
             x if x == StdlibSvcId::Unk2 as u32 => EmulatedFunction::call(&unk2, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Sprintf as u32 => EmulatedFunction::call(&sprintf, core, &mut ()).await?.write(core, lr),
+            x if x == StdlibSvcId::Vsprintf as u32 => EmulatedFunction::call(&vsprintf, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Atoi as u32 => EmulatedFunction::call(&atoi, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Rand as u32 => EmulatedFunction::call(&rand, core, system).await?.write(core, lr),
             x if x == StdlibSvcId::Srand as u32 => EmulatedFunction::call(&srand, core, system).await?.write(core, lr),
@@ -65,6 +66,13 @@ async fn sprintf(core: &mut ArmCore, _: &mut (), ptr_dst: u32, ptr_format: u32, 
     let result = kernel::sprintf(core, &format, &[a0, a1, a2, a3, a4, a5])?;
     write_null_terminated_string_bytes(core, ptr_dst, &result)?;
 
+    Ok(result.len() as u32)
+}
+
+async fn vsprintf(core: &mut ArmCore, _: &mut (), ptr_dst: u32, ptr_format: u32, ptr_args: u32) -> Result<u32> {
+    let format = read_null_terminated_string_bytes(core, ptr_format)?;
+    let result = kernel::vsprintf(core, &format, ptr_args)?;
+    write_null_terminated_string_bytes(core, ptr_dst, &result)?;
     Ok(result.len() as u32)
 }
 
@@ -192,6 +200,40 @@ mod tests {
     use wie_util::Result;
 
     use super::{rand, srand};
+
+    #[test]
+    fn variadic_format_import_reads_only_required_guest_words() -> Result<()> {
+        async {
+            use wie_util::{ByteWrite, read_null_terminated_string_bytes};
+            let mut core = ArmCore::new(false, None)?;
+            core.map(0x10000, 0x1000)?;
+            let mut state = core.save_context();
+            state.sp = 0x10800;
+            core.restore_context(&state);
+            let system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+            super::register_stdlib_svc_handler(&mut core, &system)?;
+            let stub = core.make_svc_stub(crate::runtime::SVC_CATEGORY_STDLIB, 0x3f9u32)?;
+            core.write_bytes(0x10100, b"file.Dat %%\0")?;
+            let count: u32 = core.run_function(stub, &[0x10000, 0x10100, 0]).await?;
+            assert_eq!(count, 10);
+            assert_eq!(read_null_terminated_string_bytes(&core, 0x10000)?, b"file.Dat %");
+            core.write_bytes(0x10100, b"%s %d %08x %lld %u\0")?;
+            core.write_bytes(0x10200, b"asset\0")?;
+            let words = [0x10200u32, (-7i32) as u32, 0xbeef, 1, 1, 42];
+            for (i, word) in words.iter().enumerate() {
+                core.write_bytes(0x10fe8 + i as u32 * 4, &word.to_le_bytes())?;
+            }
+            let count: u32 = core.run_function(stub, &[0x10000, 0x10100, 0x10fe8]).await?;
+            let expected = b"asset -7 0000beef 4294967297 42";
+            assert_eq!(count, expected.len() as u32);
+            assert_eq!(read_null_terminated_string_bytes(&core, 0x10000)?, expected);
+            core.write_bytes(0x10100, b"%d\0")?;
+            assert!(super::vsprintf(&mut core, &mut (), 0x10000, 0x10100, 0).await.is_err());
+            Ok(())
+        }
+        .now_or_never()
+        .expect("synchronous formatting")
+    }
 
     #[test]
     fn bounded_compare_import_returns_guest_result() -> Result<()> {

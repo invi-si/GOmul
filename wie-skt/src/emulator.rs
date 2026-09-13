@@ -22,6 +22,12 @@ pub struct SktEmulator {
     system: System,
 }
 
+impl Drop for SktEmulator {
+    fn drop(&mut self) {
+        self.system.shutdown();
+    }
+}
+
 impl SktEmulator {
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Result<Self> {
         let msd_file = files.iter().find(|x| x.0.ends_with(".msd")).unwrap();
@@ -86,6 +92,7 @@ impl SktEmulator {
         properties: BTreeMap<String, String>,
         files: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self> {
+        let packaged_stores = crate::rms_import::collect(files)?;
         let system = System::new(platform, id, id, DefaultTaskRunner);
 
         for (filename, data) in files {
@@ -95,7 +102,12 @@ impl SktEmulator {
         let mut system_clone = system.clone();
         let jar_filename_clone = jar_filename.to_owned();
 
-        system.spawn(async move || Self::do_start(&mut system_clone, jar_filename_clone, properties, main_class_name).await);
+        system.spawn(async move || {
+            for store in packaged_stores {
+                wie_midp::classes::javax::microedition::rms::install_packaged_records(&system_clone, &store.name, store.next, store.records).await?;
+            }
+            Self::do_start(&mut system_clone, jar_filename_clone, properties, main_class_name).await
+        });
 
         Ok(Self { system })
     }
@@ -107,23 +119,9 @@ impl SktEmulator {
         properties: BTreeMap<String, String>,
         main_class_name: Option<String>,
     ) -> Result<()> {
-        let system_properties = [
-            ("MIN", "01000000000"),
-            ("m.MIN", "01000000000"),
-            ("m.COLOR", "7"),
-            ("m.VENDER", "vender"),
-            ("m.CARRIER", "SKT"),
-            ("m.SK_VM", "10"),
-            ("com.xce.wipi.version", ""),
-        ];
-        let properties = properties
-            .into_iter()
-            .map(|(k, v)| (format!("wie.appProperty.{k}"), v))
-            .collect::<Vec<_>>();
-        let properties = system_properties
-            .into_iter()
-            .chain(properties.iter().map(|(k, v)| (k.as_ref(), v.as_ref())))
-            .collect::<Vec<_>>();
+        let phone_number = system.platform().phone_number().unwrap_or("01000000000").to_owned();
+        let properties = Self::runtime_properties(&phone_number, properties);
+        let properties = properties.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
 
         let protos = [
             wie_midp::get_protos().into(),
@@ -156,6 +154,27 @@ impl SktEmulator {
         }
 
         Ok(())
+    }
+
+    fn runtime_properties(phone_number: &str, properties: BTreeMap<String, String>) -> Vec<(String, String)> {
+        let system_properties = [
+            ("MIN", phone_number),
+            ("m.MIN", phone_number),
+            ("m.COLOR", "7"),
+            ("m.VENDER", "vender"),
+            ("m.CARRIER", "SKT"),
+            ("m.SK_VM", "10"),
+            ("com.xce.wipi.version", ""),
+        ];
+        let properties = properties
+            .into_iter()
+            .map(|(k, v)| (format!("wie.appProperty.{k}"), v))
+            .collect::<Vec<_>>();
+        system_properties
+            .into_iter()
+            .chain(properties.iter().map(|(k, v)| (k.as_ref(), v.as_ref())))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
     }
 }
 
@@ -226,6 +245,23 @@ mod tests {
     use alloc::{collections::BTreeMap, vec};
 
     use super::{SktEmulator, SktMsd};
+
+    #[test]
+    fn subscriber_aliases_preserve_provisioned_identity_and_separate_app_properties() {
+        for phone in ["01012349876", "01155145031", "01000000000"] {
+            let properties: BTreeMap<_, _> = SktEmulator::runtime_properties(
+                phone,
+                BTreeMap::from([("MIN".into(), "archive-value".into()), ("MIDlet-Name".into(), "sample".into())]),
+            )
+            .into_iter()
+            .collect();
+            assert_eq!(properties["MIN"], phone);
+            assert_eq!(properties["m.MIN"], phone);
+            assert_eq!(properties["wie.appProperty.MIN"], "archive-value");
+            assert_eq!(properties["wie.appProperty.MIDlet-Name"], "sample");
+            assert_eq!(properties["m.CARRIER"], "SKT");
+        }
+    }
 
     #[test]
     fn parse_msd_name() {

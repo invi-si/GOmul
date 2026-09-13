@@ -26,6 +26,7 @@ pub fn register_java_interface_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Res
 
 async fn handle_java_interface_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
+    tracing::trace!(target: "ktf_java_calls", "interface svc={} caller={lr:#x}", id.0);
 
     match JavaSvcId::try_from(id)? {
         JavaSvcId::JavaJump1 => EmulatedFunction::call(&java_jump_1, core, &mut ()).await?.write(core, lr),
@@ -99,6 +100,18 @@ pub async fn java_throw(core: &mut ArmCore, jvm: &mut Jvm, ptr_error: KtfJvmWord
     JavaMethod::handle_exception(core, jvm, exception).await
 }
 
+pub async fn java_throw_instance(core: &mut ArmCore, jvm: &mut Jvm, ptr_error: KtfJvmWord, _reserved: u32) -> Result<JavaMethodResult> {
+    let exception = if ptr_error == 0 {
+        match jvm.new_class("java/lang/NullPointerException", "()V", ()).await {
+            Ok(value) => value,
+            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+        }
+    } else {
+        Box::new(JavaClassInstance::from_raw(ptr_error, core))
+    };
+    JavaMethod::handle_exception(core, jvm, exception).await
+}
+
 fn map_exception_unwind(core: &ArmCore, caller_sp: u32, context_base: u32, target: u32, next_pc: u32) -> Result<JavaMethodResult> {
     let handler_sp: u32 = read_generic(core, context_base + 9 * 4)?;
     tracing::trace!(
@@ -116,9 +129,16 @@ fn map_exception_unwind(core: &ArmCore, caller_sp: u32, context_base: u32, targe
     Ok(JavaMethodResult::new(vec![context_base, target], Some(next_pc)))
 }
 
-fn map_jump_result(core: &ArmCore, caller_sp: u32, result: core::result::Result<u32, WieError>) -> Result<JavaMethodResult> {
+struct ReturnWords([u32; 2]);
+impl wie_core_arm::RunFunctionResult<ReturnWords> for ReturnWords {
+    fn get(core: &ArmCore) -> Self {
+        Self([core.read_param(0).unwrap(), core.read_param(1).unwrap()])
+    }
+}
+
+fn map_jump_result(core: &ArmCore, caller_sp: u32, result: core::result::Result<ReturnWords, WieError>) -> Result<JavaMethodResult> {
     match result {
-        Ok(result) => Ok(JavaMethodResult::new(vec![result], None)),
+        Ok(result) => Ok(JavaMethodResult::new(result.0.to_vec(), None)),
         Err(WieError::JavaExceptionUnwind {
             context_base,
             target,
@@ -187,7 +207,7 @@ async fn java_jump_1(core: &mut ArmCore, _: &mut (), arg1: u32, address: u32) ->
     }
 
     let caller_sp = core.save_context().sp;
-    let result = core.run_function::<u32>(address, &[arg1, 0, 0]).await;
+    let result = core.run_function::<ReturnWords>(address, &[arg1, 0, 0]).await;
     map_jump_result(core, caller_sp, result)
 }
 
@@ -307,9 +327,11 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
 
-    // TODO correctly figure out parameter
     let caller_sp = core.save_context().sp;
-    let result = match core.run_function::<u32>(address, &[ptr_data, ptr_data]).await {
+    let saved_return = KtfJvmSupport::begin_native_return(core)?;
+    let called = core.run_function::<ReturnWords>(address, &[ptr_data, ptr_data]).await;
+    let native_return = KtfJvmSupport::end_native_return(core, saved_return)?;
+    let result = match called {
         Ok(result) => result,
         Err(WieError::JavaExceptionUnwind {
             context_base,
@@ -319,8 +341,8 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
         Err(err) => return Err(err),
     };
 
-    write_generic(core, ptr_data, result)?;
-    write_generic(core, ptr_data + 4, 0u32)?;
+    // JNI context results take precedence over incidental CPU registers.
+    write_generic(core, ptr_data, native_return.unwrap_or(result.0))?;
 
     Ok(JavaMethodResult::new(vec![ptr_data], None))
 }
@@ -333,7 +355,7 @@ async fn java_jump_2(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, addre
     }
 
     let caller_sp = core.save_context().sp;
-    let result = core.run_function::<u32>(address, &[arg1, arg2, 0]).await;
+    let result = core.run_function::<ReturnWords>(address, &[arg1, arg2, 0]).await;
     map_jump_result(core, caller_sp, result)
 }
 
@@ -345,7 +367,7 @@ async fn java_jump_3(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, arg3:
     }
 
     let caller_sp = core.save_context().sp;
-    let result = core.run_function::<u32>(address, &[arg1, arg2, arg3]).await;
+    let result = core.run_function::<ReturnWords>(address, &[arg1, arg2, arg3]).await;
     map_jump_result(core, caller_sp, result)
 }
 

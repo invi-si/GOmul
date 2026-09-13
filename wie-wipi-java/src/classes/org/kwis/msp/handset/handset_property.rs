@@ -41,6 +41,9 @@ impl HandsetProperty {
 
         let value = match name.as_ref() {
             "VIBRATORLEVEL" => "0",
+            // The emulated audio path currently exposes one fixed-gain audible level.
+            // This is a capability count, not the current volume percentage.
+            "VOLUMELEVEL" => "1",
             _ => "",
         };
 
@@ -65,6 +68,38 @@ mod test {
     use wie_util::Result;
 
     use crate::get_protos;
+
+    #[test]
+    fn test_volume_capability_is_a_parseable_count() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let key = JavaLangString::from_rust_string(&jvm, "VOLUMELEVEL").await?;
+            let value: ClassInstanceRef<String> = jvm
+                .invoke_static(
+                    "org/kwis/msp/handset/HandsetProperty",
+                    "getSystemProperty",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    (key,),
+                )
+                .await?;
+            let count: i32 = jvm
+                .invoke_static("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", (value,))
+                .await?;
+            assert_eq!(count, 1);
+            for (name, expected) in [("VIBRATORLEVEL", "0"), ("unknown.property", "")] {
+                let key = JavaLangString::from_rust_string(&jvm, name).await?;
+                let value: ClassInstanceRef<String> = jvm
+                    .invoke_static(
+                        "org/kwis/msp/handset/HandsetProperty",
+                        "getSystemProperty",
+                        "(Ljava/lang/String;)Ljava/lang/String;",
+                        (key,),
+                    )
+                    .await?;
+                assert_eq!(JavaLangString::to_rust_string(&jvm, &value).await?, expected);
+            }
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_set_system_property_returns_false() -> Result<()> {

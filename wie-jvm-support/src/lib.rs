@@ -68,24 +68,79 @@ impl JvmSupport {
     pub async fn to_wie_err(jvm: &Jvm, err: JavaError) -> WieError {
         match err {
             JavaError::JavaException(x) => {
-                let string_writer = jvm.new_class("java/io/StringWriter", "()V", ()).await.unwrap();
-                let print_writer = jvm
-                    .new_class("java/io/PrintWriter", "(Ljava/io/Writer;)V", (string_writer.clone(),))
-                    .await
-                    .unwrap();
-
-                let _: () = jvm
-                    .invoke_virtual(&x, "java/lang/Throwable", "printStackTrace", "(Ljava/io/PrintWriter;)V", (print_writer,))
-                    .await
-                    .unwrap();
-
-                let trace = jvm
-                    .invoke_virtual(&string_writer, "java/io/StringWriter", "toString", "()Ljava/lang/String;", [])
-                    .await
-                    .unwrap();
-
-                WieError::FatalError(format!("\n{}", JavaLangString::to_rust_string(jvm, &trace).await.unwrap()))
+                // Reporting a guest exception may itself invoke broken/missing guest
+                // methods. Never turn that secondary failure into a host panic.
+                let rendered: jvm::Result<alloc::string::String> = async {
+                    let string_writer = jvm.new_class("java/io/StringWriter", "()V", ()).await?;
+                    let print_writer = jvm
+                        .new_class("java/io/PrintWriter", "(Ljava/io/Writer;)V", (string_writer.clone(),))
+                        .await?;
+                    let _: () = jvm
+                        .invoke_virtual(&x, "java/lang/Throwable", "printStackTrace", "(Ljava/io/PrintWriter;)V", (print_writer,))
+                        .await?;
+                    let trace = jvm
+                        .invoke_virtual(&string_writer, "java/io/StringWriter", "toString", "()Ljava/lang/String;", ())
+                        .await?;
+                    JavaLangString::to_rust_string(jvm, &trace).await
+                }
+                .await;
+                match rendered {
+                    Ok(trace) => WieError::FatalError(format!("\n{trace}")),
+                    Err(secondary) => {
+                        let class = x.class_definition().name();
+                        let message = match jvm
+                            .get_field::<jvm::ClassInstanceRef<JavaLangString>>(&x, "detailMessage", "Ljava/lang/String;")
+                            .await
+                        {
+                            Ok(message) if !message.is_null() => JavaLangString::to_rust_string(jvm, &message).await.unwrap_or_default(),
+                            _ => alloc::string::String::new(),
+                        };
+                        WieError::FatalError(format!("{class}: {message} (stack trace unavailable: {secondary:?})"))
+                    }
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reporting_tests {
+    use super::*;
+    use alloc::vec;
+    use jvm::ClassInstanceRef;
+    use jvm_class_proto::JavaMethodProto;
+    use test_utils::run_jvm_test;
+
+    async fn fail_trace<C: Send>(jvm: &Jvm, _: &mut C, _: ClassInstanceRef<()>, _: ClassInstanceRef<()>) -> jvm::Result<()> {
+        Err(jvm.exception("java/lang/RuntimeException", "secondary failure").await)
+    }
+
+    #[test]
+    fn failed_exception_formatter_preserves_original_error_without_panicking() -> Result<()> {
+        let proto = jvm_class_proto::JavaClassProto {
+            name: "test/BrokenTrace",
+            parent_class: Some("java/lang/Exception"),
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![JavaMethodProto::new(
+                "printStackTrace",
+                "(Ljava/io/PrintWriter;)V",
+                fail_trace::<_>,
+                Default::default(),
+            )],
+            access_flags: Default::default(),
+        };
+        run_jvm_test(Box::new([vec![proto].into()]), |jvm| async move {
+            let mut error = jvm.instantiate_class("test/BrokenTrace").await?;
+            let text = JavaLangString::from_rust_string(&jvm, "original failure").await?;
+            jvm.put_field(&mut error, "detailMessage", "Ljava/lang/String;", text).await?;
+            let actual = JvmSupport::to_wie_err(&jvm, JavaError::JavaException(error)).await.to_string();
+            assert!(actual.contains("test/BrokenTrace: original failure"));
+            assert!(actual.contains("stack trace unavailable"));
+            let empty = jvm.instantiate_class("test/BrokenTrace").await?;
+            let actual = JvmSupport::to_wie_err(&jvm, JavaError::JavaException(empty)).await.to_string();
+            assert!(actual.contains("test/BrokenTrace:"));
+            Ok(())
+        })
     }
 }

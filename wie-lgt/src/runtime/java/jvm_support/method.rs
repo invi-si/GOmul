@@ -152,7 +152,8 @@ impl Method for JavaMethod {
         let return_type = JavaType::parse(&self.descriptor()).as_method().1.clone();
         let codec = JavaValueCodec::new(&self.core);
         let raw_args = encode_method_arguments(&codec, &args);
-        let result: Result<JavaMethodRunResult> = self.core.clone().run_function(self.target().unwrap(), &raw_args).await;
+        let result: Result<JavaMethodRunResult> =
+            crate::runtime::java::exception::invocation(&mut self.core.clone(), self.target().unwrap(), &raw_args).await;
         match result.map(|result| {
             if matches!(return_type, JavaType::Double | JavaType::Long) {
                 codec.decode_wide(result.low, result.high, &return_type)

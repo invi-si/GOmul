@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::{
     boxed::Box,
     string::{String, ToString},
@@ -56,6 +57,11 @@ impl Default for TestPlatform {
 }
 
 impl TestPlatform {
+    pub fn with_paint_handler(mut self, handler: impl Fn(&dyn Image) + Send + Sync + 'static) -> Self {
+        self.screen.paint_handler = Some(Box::new(handler));
+        self
+    }
+
     pub fn with_phone_number(mut self, number: &str) -> Self {
         self.phone_number = Some(String::from(number));
         self
@@ -178,6 +184,55 @@ impl DatabaseRepository for MemoryDatabaseRepository {
         self.store.lock().remove(&(app_id.to_string(), name.to_string())).is_some()
     }
 
+    async fn create_directory(&self, name: &str, app_id: &str) -> bool {
+        let mut store = self.store.lock();
+        let name = name.trim_matches('/');
+        let key = (app_id.to_string(), name.to_string());
+        if store.contains_key(&key) {
+            return false;
+        }
+        if let Some((parent, _)) = name.rsplit_once('/') {
+            let Some(records) = store.get(&(app_id.to_string(), parent.to_string())) else {
+                return false;
+            };
+            if records.contains_key(&1) {
+                return false;
+            }
+        }
+        store.insert(key, HashMap::new());
+        true
+    }
+
+    async fn list_directory(&self, name: &str, app_id: &str) -> Option<Vec<String>> {
+        let store = self.store.lock();
+        let name = name.trim_matches('/');
+        if !name.is_empty() && name != "." {
+            let records = store.get(&(app_id.to_string(), name.to_string()))?;
+            if records.contains_key(&1) {
+                return None;
+            }
+        }
+        let prefix = if name.is_empty() || name == "." {
+            String::new()
+        } else {
+            format!("{name}/")
+        };
+        let mut result = Vec::new();
+        for (app, path) in store.keys() {
+            if app != app_id {
+                continue;
+            }
+            if let Some(tail) = path.strip_prefix(&prefix) {
+                let child = tail.split('/').next().unwrap();
+                if !child.is_empty() && !result.iter().any(|s| s == child) {
+                    result.push(child.to_string());
+                }
+            }
+        }
+        result.sort();
+        Some(result)
+    }
+
     async fn usage(&self, app_id: &str) -> u64 {
         self.store
             .lock()
@@ -241,9 +296,12 @@ impl AudioSink for TestAudioSink {
     fn send(&self, _command: wie_backend::AudioCommand) {}
 }
 
+type PaintHandler = dyn Fn(&dyn Image) + Send + Sync;
+
 pub struct TestScreen {
     width: AtomicU32,
     height: AtomicU32,
+    paint_handler: Option<Box<PaintHandler>>,
 }
 
 impl Default for TestScreen {
@@ -251,6 +309,7 @@ impl Default for TestScreen {
         Self {
             width: AtomicU32::new(320),
             height: AtomicU32::new(240),
+            paint_handler: None,
         }
     }
 }
@@ -267,7 +326,11 @@ impl Screen for TestScreen {
         Ok(())
     }
 
-    fn paint(&self, _image: &dyn Image) {}
+    fn paint(&self, image: &dyn Image) {
+        if let Some(handler) = &self.paint_handler {
+            handler(image);
+        }
+    }
 
     fn width(&self) -> u32 {
         self.width.load(Ordering::SeqCst)

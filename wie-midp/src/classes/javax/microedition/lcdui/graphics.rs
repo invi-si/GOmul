@@ -36,6 +36,19 @@ impl TypeConverter<Anchor> for Anchor {
     }
 }
 
+impl Anchor {
+    fn text_top(&self, y: i32) -> i32 {
+        if self.contains(Self::BOTTOM) {
+            y - Font::HEIGHT
+        } else if self.contains(Self::BASELINE) {
+            // The backend's current fixed-size font places the baseline 10 pixels below the top.
+            y - Font::BASELINE
+        } else {
+            y
+        }
+    }
+}
+
 impl From<Anchor> for TextAlignment {
     fn from(anchor: Anchor) -> Self {
         if anchor.contains(Anchor::HCENTER) {
@@ -115,6 +128,7 @@ impl Graphics {
             ],
             fields: vec![
                 JavaFieldProto::new("img", "Ljavax/microedition/lcdui/Image;", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("presentationOwner", "Ljavax/microedition/lcdui/Display;", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("width", "I", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("height", "I", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("clipX", "I", FieldAccessFlags::PRIVATE),
@@ -438,7 +452,7 @@ impl Graphics {
             context.system().platform().font(),
             &string,
             (translate_x + x) as _,
-            (translate_y + y) as _,
+            (translate_y + anchor.text_top(y)) as _,
             anchor.into(),
             Rgb8Pixel::to_color(color as _),
             clip,
@@ -476,7 +490,7 @@ impl Graphics {
             context.system().platform().font(),
             &string,
             (translate_x + x) as _,
-            (translate_y + y) as _,
+            (translate_y + anchor.text_top(y)) as _,
             anchor.into(),
             Rgb8Pixel::to_color(color as _),
             clip,
@@ -514,7 +528,7 @@ impl Graphics {
             context.system().platform().font(),
             &string,
             (translate_x + x) as _,
-            (translate_y + y) as _,
+            (translate_y + anchor.text_top(y)) as _,
             anchor.into(),
             Rgb8Pixel::to_color(color as _),
             clip,
@@ -551,7 +565,7 @@ impl Graphics {
             context.system().platform().font(),
             &substring,
             (translate_x + x) as _,
-            (translate_y + y) as _,
+            (translate_y + anchor.text_top(y)) as _,
             anchor.into(),
             Rgb8Pixel::to_color(color as _),
             clip,
@@ -841,7 +855,7 @@ impl Graphics {
         jvm: &Jvm,
         _: &mut WieJvmContext,
         mut this: ClassInstanceRef<Graphics>,
-        rgb_data: ClassInstanceRef<Array<i8>>,
+        rgb_data: ClassInstanceRef<Array<i32>>,
         offset: i32,
         scan_length: i32,
         x: i32,
@@ -854,8 +868,30 @@ impl Graphics {
             "javax.microedition.lcdui.Graphics::drawRGB({this:?}, {rgb_data:?}, {offset}, {scan_length}, {x}, {y}, {width}, {height}, {process_alpha})"
         );
 
-        // TODO proper scanlength support
-        let pixel_data: Vec<i32> = jvm.load_array(&rgb_data, offset as _, (width * height) as _).await?;
+        if rgb_data.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "rgbData").await);
+        }
+        if width <= 0 || height <= 0 {
+            return Ok(());
+        }
+        // MIDP permits padded, overlapping, zero-stride and reversed rows.
+        // Check the entire source range before changing any destination pixels.
+        let first = offset as i64;
+        let last = first + (height as i64 - 1) * scan_length as i64;
+        let length = jvm.array_length(&rgb_data).await? as i64;
+        if first.min(last) < 0 || first.max(last) + width as i64 > length {
+            return Err(jvm.exception("java/lang/ArrayIndexOutOfBoundsException", "RGB source range").await);
+        }
+        let pixel_data: Vec<i32> = if scan_length == width {
+            jvm.load_array(&rgb_data, offset as usize, width as usize * height as usize).await?
+        } else {
+            let mut data = Vec::new();
+            for row in 0..height {
+                let start = first + row as i64 * scan_length as i64;
+                data.extend(jvm.load_array::<i32>(&rgb_data, start as usize, width as usize).await?);
+            }
+            data
+        };
 
         let mut canvas = Self::canvas(jvm, &mut this).await?;
 
@@ -894,6 +930,15 @@ impl Graphics {
         let xor_mode: bool = jvm.get_field(this, "xorMode", "Z").await?;
 
         canvas.set_xor_mode(xor_mode);
+        // A native adapter can associate its display with this screen target.
+        // Real Java drawing takes presentation back from direct C flushes;
+        // offscreen graphics and clip/color changes do not change ownership.
+        let mut display: ClassInstanceRef<()> = jvm.get_field(this, "presentationOwner", "Ljavax/microedition/lcdui/Display;").await?;
+        if !display.is_null() {
+            jvm.put_field(&mut display, "paintDisabled", "Z", false).await?;
+            jvm.put_field(&mut display, "nativePaintActive", "Z", false).await?;
+            jvm.put_field(&mut display, "nativeScreenOwned", "Z", false).await?;
+        }
 
         Ok(canvas)
     }
@@ -939,14 +984,108 @@ impl Graphics {
 
 #[cfg(test)]
 mod test {
-    use alloc::{boxed::Box, vec};
+    use alloc::{boxed::Box, vec, vec::Vec};
 
     use jvm::{ClassInstance, ClassInstanceRef, Jvm, Result as JvmResult};
 
     use test_utils::run_jvm_test;
     use wie_util::Result;
 
-    use crate::{classes::javax::microedition::lcdui::Image, get_protos};
+    use crate::{
+        classes::javax::microedition::lcdui::{Font, Image},
+        get_protos,
+    };
+
+    #[test]
+    fn text_vertical_anchors_preserve_pixels_at_bottom_with_translation_and_clip() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let mut reference = None;
+            for method in 0..4 {
+                let font = jvm
+                    .invoke_static("javax/microedition/lcdui/Font", "getDefaultFont", "()Ljavax/microedition/lcdui/Font;", ())
+                    .await?;
+                let baseline: i32 = jvm
+                    .invoke_virtual(&font, "javax/microedition/lcdui/Font", "getBaselinePosition", "()I", ())
+                    .await?;
+                assert!(baseline > 0 && baseline < Font::HEIGHT);
+                for (anchor, y) in [(20, 20), (36, 32), (68, 20 + baseline), (0, 20)] {
+                    let image: ClassInstanceRef<Image> = jvm
+                        .invoke_static(
+                            "javax/microedition/lcdui/Image",
+                            "createImage",
+                            "(II)Ljavax/microedition/lcdui/Image;",
+                            (48, 36),
+                        )
+                        .await?;
+                    let graphics = jvm
+                        .new_class(
+                            "javax/microedition/lcdui/Graphics",
+                            "(Ljavax/microedition/lcdui/Image;)V",
+                            (image.clone(),),
+                        )
+                        .await?;
+                    jvm.invoke_virtual::<_, ()>(&graphics, "javax/microedition/lcdui/Graphics", "translate", "(II)V", (3, 2))
+                        .await?;
+                    jvm.invoke_virtual::<_, ()>(&graphics, "javax/microedition/lcdui/Graphics", "setClip", "(IIII)V", (0, 0, 40, 32))
+                        .await?;
+                    let string = jvm::runtime::JavaLangString::from_rust_string(&jvm, "한").await?;
+                    match method {
+                        0 => {
+                            jvm.invoke_virtual::<_, ()>(
+                                &graphics,
+                                "javax/microedition/lcdui/Graphics",
+                                "drawString",
+                                "(Ljava/lang/String;III)V",
+                                (string, 2, y, anchor),
+                            )
+                            .await?
+                        }
+                        1 => {
+                            jvm.invoke_virtual::<_, ()>(
+                                &graphics,
+                                "javax/microedition/lcdui/Graphics",
+                                "drawSubstring",
+                                "(Ljava/lang/String;IIIII)V",
+                                (string, 0, 1, 2, y, anchor),
+                            )
+                            .await?
+                        }
+                        2 => {
+                            jvm.invoke_virtual::<_, ()>(
+                                &graphics,
+                                "javax/microedition/lcdui/Graphics",
+                                "drawChar",
+                                "(CIII)V",
+                                ('한' as u16, 2, y, anchor),
+                            )
+                            .await?
+                        }
+                        _ => {
+                            let mut chars = jvm.instantiate_array("C", 1).await?;
+                            jvm.store_array(&mut chars, 0, vec!['한' as u16]).await?;
+                            jvm.invoke_virtual::<_, ()>(
+                                &graphics,
+                                "javax/microedition/lcdui/Graphics",
+                                "drawChars",
+                                "([CIIIII)V",
+                                (chars, 0, 1, 2, y, anchor),
+                            )
+                            .await?;
+                        }
+                    }
+                    let rendered = Image::image(&jvm, &image).await?;
+                    let pixels: alloc::vec::Vec<_> = rendered.colors().iter().map(|c| (c.r, c.g, c.b, c.a)).collect();
+                    assert!(pixels.iter().any(|p| *p != pixels[0]), "must actually render text");
+                    if let Some(expected) = &reference {
+                        assert_eq!(&pixels, expected);
+                    } else {
+                        reference = Some(pixels);
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_graphics() -> Result<()> {
@@ -1248,6 +1387,82 @@ mod test {
             let color = backend_image.get_pixel(3, 2);
             assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
 
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn draw_rgb_honors_signed_and_zero_stride_and_rejects_invalid_ranges_before_paint() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let (image, graphics) = new_graphics(&jvm).await?;
+            let mut data = jvm.instantiate_array("I", 5).await?;
+            jvm.store_array(&mut data, 0, vec![0x110000i32, 0x220000, 0x330000, 0x440000, 0x550000])
+                .await?;
+            for (x, offset, stride, expected) in [
+                (0, 0, 3, [0x11, 0x22, 0x44, 0x55]),
+                (3, 3, -3, [0x44, 0x55, 0x11, 0x22]),
+                (6, 1, 0, [0x22, 0x33, 0x22, 0x33]),
+            ] {
+                let _: () = jvm
+                    .invoke_virtual(
+                        &graphics,
+                        "javax/microedition/lcdui/Graphics",
+                        "drawRGB",
+                        "([IIIIIIIZ)V",
+                        (data.clone(), offset, stride, x, 0, 2, 2, false),
+                    )
+                    .await?;
+                let pixels = Image::image(&jvm, &image).await?;
+                for (index, red) in expected.into_iter().enumerate() {
+                    assert_eq!(pixels.get_pixel(x + (index % 2) as i32, (index / 2) as i32).r, red);
+                }
+            }
+            let before: Vec<_> = Image::image(&jvm, &image)
+                .await?
+                .colors()
+                .into_iter()
+                .map(|c| (c.r, c.g, c.b, c.a))
+                .collect();
+            for (offset, stride) in [(0, -3), (1, 3), (i32::MAX, 1), (0, i32::MAX)] {
+                assert!(
+                    jvm.invoke_virtual::<_, ()>(
+                        &graphics,
+                        "javax/microedition/lcdui/Graphics",
+                        "drawRGB",
+                        "([IIIIIIIZ)V",
+                        (data.clone(), offset, stride, 0, 0, 2, 2, false)
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+            let after: Vec<_> = Image::image(&jvm, &image)
+                .await?
+                .colors()
+                .into_iter()
+                .map(|c| (c.r, c.g, c.b, c.a))
+                .collect();
+            assert_eq!(after, before);
+            assert!(
+                jvm.invoke_virtual::<_, ()>(
+                    &graphics,
+                    "javax/microedition/lcdui/Graphics",
+                    "drawRGB",
+                    "([IIIIIIIZ)V",
+                    (ClassInstanceRef::<()>::from(None), 0, 1, 0, 0, 1, 1, true)
+                )
+                .await
+                .is_err()
+            );
+            let _: () = jvm
+                .invoke_virtual(
+                    &graphics,
+                    "javax/microedition/lcdui/Graphics",
+                    "drawRGB",
+                    "([IIIIIIIZ)V",
+                    (data, -1, -1, 0, 0, 0, 2, true),
+                )
+                .await?;
             Ok(())
         })
     }

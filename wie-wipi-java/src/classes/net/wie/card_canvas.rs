@@ -272,7 +272,9 @@ impl CardCanvas {
         }
 
         let cards = jvm.get_field(&this, "cards", "Ljava/util/Vector;").await?;
-        let canvas: ClassInstanceRef<MidpCanvas> = jvm.get_field(&c, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
+        let canvas: ClassInstanceRef<MidpCanvas> = jvm
+            .get_field_in_class(&c, "org/kwis/msp/lcdui/Card", "canvas", "Ljavax/microedition/lcdui/Canvas;")
+            .await?;
         let index: i32 = jvm
             .invoke_virtual(&cards, "java/util/Vector", "indexOf", "(Ljava/lang/Object;)I", (c.clone(),))
             .await?;

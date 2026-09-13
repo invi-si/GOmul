@@ -69,7 +69,7 @@ impl JavaClassDefinition {
 
         let field_offset_base: u32 = if let Some(x) = &parent_class { x.field_size()? as _ } else { 0 };
 
-        let ptr_raw = Allocator::alloc(core, size_of::<RawJavaClass>() as u32)?;
+        let ptr_raw = super::class_memory::allocate(core)?;
 
         let mut methods = Vec::new();
         for method in proto.methods.into_iter() {
@@ -245,9 +245,7 @@ impl JavaClassDefinition {
         let methods = self.methods()?;
 
         for method in methods {
-            let full_name = method.name()?;
-            if full_name.name == name && full_name.descriptor == descriptor && method.access_flags().contains(MethodAccessFlags::STATIC) == is_static
-            {
+            if method.matches_name(name, descriptor)? && method.access_flags().contains(MethodAccessFlags::STATIC) == is_static {
                 return Ok(Some(method));
             }
         }
@@ -259,8 +257,7 @@ impl JavaClassDefinition {
         let fields = self.fields()?;
 
         for field in fields {
-            let full_name = field.name()?;
-            if full_name.name == name && full_name.descriptor == descriptor && field.access_flags().contains(FieldAccessFlags::STATIC) == is_static {
+            if field.matches_name(name, descriptor)? && field.access_flags().contains(FieldAccessFlags::STATIC) == is_static {
                 return Ok(Some(field));
             }
         }

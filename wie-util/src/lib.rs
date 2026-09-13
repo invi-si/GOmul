@@ -50,6 +50,12 @@ pub type Result<T> = result::Result<T, WieError>;
 
 pub trait ByteRead {
     fn read_bytes(&self, address: u32, result: &mut [u8]) -> Result<usize>;
+
+    /// Read guest bytes up to NUL. The default does not read past the terminator,
+    /// including for readers backed by side-effectful or narrowly valid storage.
+    fn read_c_string(&self, address: u32) -> Result<Vec<u8>> {
+        read_c_string_bytewise(self, address)
+    }
 }
 
 pub trait ByteWrite {
@@ -82,6 +88,10 @@ pub fn read_null_terminated_string_bytes<R>(reader: &R, address: u32) -> Result<
 where
     R: ?Sized + ByteRead,
 {
+    reader.read_c_string(address)
+}
+
+fn read_c_string_bytewise<R: ?Sized + ByteRead>(reader: &R, address: u32) -> Result<Vec<u8>> {
     if address == 0 {
         return Err(WieError::InvalidMemoryAccess(address));
     }

@@ -1,0 +1,31 @@
+use alloc::vec;
+
+use jvm::{ClassInstanceRef, Jvm, Result};
+use jvm_class_proto::JavaMethodProto;
+use jvm_types::{ClassAccessFlags, MethodAccessFlags};
+
+use crate::{RuntimeClassProto, RuntimeContext};
+
+// abstract class java.util.Dictionary
+pub struct Dictionary;
+
+impl Dictionary {
+    pub fn as_proto() -> RuntimeClassProto {
+        RuntimeClassProto {
+            name: "java/util/Dictionary",
+            parent_class: Some("java/lang/Object"),
+            interfaces: vec![],
+            methods: vec![JavaMethodProto::new("<init>", "()V", Self::init, MethodAccessFlags::PUBLIC)],
+            fields: vec![],
+            access_flags: ClassAccessFlags::ABSTRACT,
+        }
+    }
+
+    async fn init(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<()> {
+        tracing::debug!("java.util.Dictionary::<init>({this:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        Ok(())
+    }
+}

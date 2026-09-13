@@ -45,6 +45,8 @@ pub enum Step {
 
 #[derive(Default)]
 pub struct Tape {
+    // Presentation mirror reconstructed from the recorded input stream.
+    pub korean_input: bool,
     pub bytes: Vec<u8>,
     cursor: Option<usize>,
     repeated: u32,
@@ -52,6 +54,7 @@ pub struct Tape {
     clock_record: Option<usize>,
     pub error: Option<String>,
     offset: i128,
+    speed_clock: Option<(u64, u64, u32)>,
     safe_end: usize,
     safe_clock: Option<(usize, [u8; 4])>,
 }
@@ -122,6 +125,16 @@ impl Tape {
     fn word(&mut self) -> u64 {
         self.take(8).map(|v| u64::from_le_bytes(v.try_into().unwrap())).unwrap_or(0)
     }
+    fn live_wall(&self, host: u64) -> u64 {
+        match self.speed_clock {
+            Some((anchor, value, rate)) => value.saturating_add(host.saturating_sub(anchor).saturating_mul(rate as u64) / 1000),
+            None => host,
+        }
+    }
+    pub fn set_speed(&mut self, rate: u32) {
+        let host = wall();
+        self.speed_clock = Some((host, self.live_wall(host), rate.clamp(250, 3000)));
+    }
     pub fn now(&mut self) -> u64 {
         if self.cursor.is_some() {
             if self.error.is_some() {
@@ -143,7 +156,7 @@ impl Tape {
                 .saturating_sub(1);
             return self.last_clock;
         }
-        let value = (wall() as i128 + self.offset).max(0) as u64;
+        let value = (self.live_wall(wall()) as i128 + self.offset).max(0) as u64;
         if let Some(pos) = self.clock_record {
             if self.last_clock == value {
                 let count = u32::from_le_bytes(self.bytes[pos + 9..pos + 13].try_into().unwrap());
@@ -201,8 +214,12 @@ impl Tape {
         Ok(())
     }
     pub fn event(&mut self, event: &Event) {
+        if let Event::TextInputMode(korean) = event {
+            self.korean_input = *korean;
+        }
         let (kind, key) = match event {
             Event::Redraw => (0, 0),
+            Event::TextInputMode(korean) => (4, u8::from(*korean)),
             Event::Keydown(k) => (1, key(*k)),
             Event::Keyup(k) => (2, key(*k)),
             Event::Keyrepeat(k) => (3, key(*k)),
@@ -224,6 +241,12 @@ impl Tape {
             Some(5) => Ok(Step::ConsumeRedraw),
             Some(4) => {
                 let bytes = self.take(2).ok_or_else(|| anyhow::anyhow!("Truncated checkpoint event"))?;
+                if bytes[0] == 4 {
+                    anyhow::ensure!(bytes[1] <= 1, "Invalid text input mode");
+                    let korean = bytes[1] != 0;
+                    self.korean_input = korean;
+                    return Ok(Step::Event(Event::TextInputMode(korean)));
+                }
                 let code = *KEYS.get(bytes[1] as usize).ok_or_else(|| anyhow::anyhow!("Invalid checkpoint key"))?;
                 Ok(Step::Event(match bytes[0] {
                     0 => Event::Redraw,
@@ -413,6 +436,21 @@ impl Slots {
 mod rescue_boundary_tests {
     use super::*;
     #[test]
+    fn text_input_mode_round_trips_in_order_with_keys() {
+        let mut tape = Tape::default();
+        tape.event(&Event::TextInputMode(true));
+        tape.event(&Event::Keydown(KeyCode::NUM4));
+        tape.event(&Event::Keyup(KeyCode::NUM4));
+        tape.event(&Event::TextInputMode(false));
+        let mut replay = Tape::replay(tape.bytes.clone());
+        assert!(matches!(replay.next().unwrap(), Step::Event(Event::TextInputMode(true))));
+        assert!(matches!(replay.next().unwrap(), Step::Event(Event::Keydown(KeyCode::NUM4))));
+        assert!(matches!(replay.next().unwrap(), Step::Event(Event::Keyup(KeyCode::NUM4))));
+        assert!(matches!(replay.next().unwrap(), Step::Event(Event::TextInputMode(false))));
+        assert!(replay.done());
+        assert!(Tape::replay(vec![4, 4, 2]).next().is_err());
+    }
+    #[test]
     fn safe_prefix_survives_clock_compression_and_failed_tick() {
         let mut tape = Tape::default();
         tape.bytes.push(1);
@@ -461,6 +499,87 @@ mod rescue_build_gate_tests {
         assert!(error.contains("APK build"));
         assert_eq!(fs::read(save.join("keep")).unwrap(), b"original");
         assert!(!slots.root.join("rollback").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::Tape;
+    #[test]
+    fn speed_scales_elapsed_clock_without_changing_anchor() {
+        let mut tape = Tape::default();
+        assert_eq!(tape.live_wall(5000), 5000);
+        for (rate, expected) in [(250, 5250), (1000, 6000), (2000, 7000), (3000, 8000)] {
+            tape.speed_clock = Some((1000, 5000, rate));
+            assert_eq!(tape.live_wall(1000), 5000);
+            assert_eq!(tape.live_wall(2000), expected);
+            assert_eq!(tape.live_wall(999), 5000);
+        }
+    }
+    #[test]
+    fn speed_setting_does_not_add_replay_events() {
+        let mut tape = Tape::default();
+        tape.set_speed(2000);
+        assert!(tape.bytes.is_empty());
+        let value = tape.now();
+        let mut replay = Tape::replay(tape.bytes);
+        replay.set_speed(250);
+        assert_eq!(replay.now(), value);
+        assert!(replay.done());
+    }
+}
+
+// Keep the original quick-save directory as slot 1; recovery/startup remain separate.
+pub fn quick_action(action: &str) -> (&str, &str) {
+    match action {
+        "save:1" => ("save", "quick"),
+        "load:1" => ("load", "quick"),
+        "save:2" => ("save", "quick-2"),
+        "load:2" => ("load", "quick-2"),
+        "save:3" => ("save", "quick-3"),
+        "load:3" => ("load", "quick-3"),
+        _ => (action, "quick"),
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    #[test]
+    fn numbered_actions_preserve_legacy_and_special_slots() {
+        for (number, directory) in [(1, "quick"), (2, "quick-2"), (3, "quick-3")] {
+            for action in ["save", "load"] {
+                assert_eq!(quick_action(&format!("{action}:{number}")), (action, directory));
+            }
+        }
+        for action in ["save", "load", "recover", "load-startup", "rescue-verify", "save:4", "load:../quick"] {
+            assert_eq!(quick_action(action), (action, "quick"));
+        }
+    }
+    #[test]
+    fn numbered_slots_and_games_do_not_overwrite_each_other() {
+        if BUILD.is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("gomul-three-slots-{}-{}", std::process::id(), wall()));
+        for game in ["a", "b"] {
+            let save = root.join("saves").join(game);
+            fs::create_dir_all(&save).unwrap();
+            let slots = Slots::new(save.to_str().unwrap()).unwrap();
+            for name in ["quick", "quick-2", "quick-3"] {
+                slots
+                    .store(name, &Tape::default(), format!("{game}-{name}").as_bytes(), b"archive")
+                    .unwrap();
+            }
+            slots.store("quick-2", &Tape::default(), b"replacement", b"archive").unwrap();
+            assert_eq!(fs::read(slots.slot("quick").join("frame")).unwrap(), format!("{game}-quick").as_bytes());
+            assert_eq!(
+                fs::read(slots.slot("quick-3").join("frame")).unwrap(),
+                format!("{game}-quick-3").as_bytes()
+            );
+            assert_eq!(fs::read(slots.slot("quick-2").join("frame")).unwrap(), b"replacement");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

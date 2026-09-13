@@ -317,6 +317,65 @@ impl Jvm {
         }
     }
 
+    /// Resolve an instance field from its symbolic declaring class. Unlike
+    /// virtual methods, fields are not overridden by same-named subclass fields.
+    pub async fn get_field_in_class<T>(&self, instance: &Box<dyn ClassInstance>, class_name: &str, name: &str, descriptor: &str) -> Result<T>
+    where
+        T: From<JavaValue>,
+    {
+        tracing::trace!("Get field {}.{name}:{descriptor}", class_name);
+
+        let class = self.resolve_class(class_name).await?;
+        let field = self.find_field(&*class.definition, name, descriptor)?;
+
+        if let Some(field) = field {
+            let value = instance.get_field(&*field)?;
+            if let JavaValue::Object(Some(instance)) = &value {
+                let thread_id = (self.inner.get_current_thread_id)();
+                self.inner
+                    .threads
+                    .write()
+                    .get_mut(&thread_id)
+                    .unwrap()
+                    .top_frame_mut()
+                    .local_variables_mut()
+                    .push(instance.clone());
+            }
+            Ok(value.into())
+        } else {
+            Err(self
+                .exception("java/lang/NoSuchFieldError", &format!("{}.{}:{}", class_name, name, descriptor))
+                .await)
+        }
+    }
+
+    /// Write the field selected by the symbolic declaring class, preserving
+    /// any distinct field a subclass declares with the same name and descriptor.
+    pub async fn put_field_in_class<T>(
+        &self,
+        instance: &mut Box<dyn ClassInstance>,
+        class_name: &str,
+        name: &str,
+        descriptor: &str,
+        value: T,
+    ) -> Result<()>
+    where
+        T: Into<JavaValue> + Debug,
+    {
+        tracing::trace!("Put field {}.{name}:{descriptor} = {value:?}", class_name);
+
+        let class = self.resolve_class(class_name).await?;
+        let field = self.find_field(&*class.definition, name, descriptor)?;
+
+        if let Some(field) = field {
+            instance.put_field(&*field, value.into())
+        } else {
+            Err(self
+                .exception("java/lang/NoSuchFieldError", &format!("{}.{}:{}", class_name, name, descriptor))
+                .await)
+        }
+    }
+
     pub async fn invoke_static<T, U>(&self, class_name: &str, name: &str, descriptor: &str, args: T) -> Result<U>
     where
         T: InvokeArg,

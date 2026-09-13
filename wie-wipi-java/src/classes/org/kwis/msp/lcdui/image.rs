@@ -111,14 +111,23 @@ impl Image {
     }
 
     async fn load_image(
-        _: &Jvm,
+        jvm: &Jvm,
         _: &mut WieJvmContext,
         name: ClassInstanceRef<String>,
         observer: ClassInstanceRef<ImageObserver>,
     ) -> JvmResult<ClassInstanceRef<Image>> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Image::loadImage({name:?}, {observer:?})");
-
-        Ok(None.into())
+        if name.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "image path").await);
+        }
+        let image = jvm.new_class("org/kwis/msp/lcdui/Image", "()V", ()).await?;
+        crate::classes::net::wie::ImageLoadTask::enqueue(
+            jvm,
+            image.clone().into(),
+            jvm::JavaValue::from(name).into(),
+            jvm::JavaValue::from(observer).into(),
+        )
+        .await?;
+        Ok(image.into())
     }
 
     async fn create_image(jvm: &Jvm, _: &mut WieJvmContext, width: i32, height: i32) -> JvmResult<ClassInstanceRef<Image>> {
@@ -232,6 +241,9 @@ impl Image {
         tracing::debug!("org.kwis.msp.lcdui.Image::getWidth({this:?})");
 
         let midp_image: ClassInstanceRef<MidpImage> = jvm.get_field(&this, "midpImage", "Ljavax/microedition/lcdui/Image;").await?;
+        if midp_image.is_null() {
+            return Ok(0);
+        }
 
         jvm.invoke_virtual(&midp_image, "javax/microedition/lcdui/Image", "getWidth", "()I", ())
             .await
@@ -241,6 +253,9 @@ impl Image {
         tracing::debug!("org.kwis.msp.lcdui.Image::getHeight({this:?})");
 
         let midp_image: ClassInstanceRef<MidpImage> = jvm.get_field(&this, "midpImage", "Ljavax/microedition/lcdui/Image;").await?;
+        if midp_image.is_null() {
+            return Ok(0);
+        }
 
         jvm.invoke_virtual(&midp_image, "javax/microedition/lcdui/Image", "getHeight", "()I", ())
             .await
@@ -270,10 +285,8 @@ impl Image {
         Ok(())
     }
 
-    async fn stop_image(_: &Jvm, _: &mut WieJvmContext, observer: ClassInstanceRef<ImageObserver>) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Image::stopImage({observer:?})");
-
-        Ok(())
+    async fn stop_image(jvm: &Jvm, _: &mut WieJvmContext, observer: ClassInstanceRef<ImageObserver>) -> JvmResult<()> {
+        crate::classes::net::wie::ImageLoadTask::cancel(jvm, jvm::JavaValue::from(observer).into()).await
     }
 
     #[allow(clippy::too_many_arguments)]

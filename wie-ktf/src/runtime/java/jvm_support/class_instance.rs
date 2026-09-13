@@ -14,8 +14,6 @@ use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::native::NativeJavaValueCodec;
 use wie_util::{ByteRead, ByteWrite, read_generic, write_generic};
 
-use crate::runtime::java::jvm_support::KtfJvmSupport;
-
 use super::{KtfJvmWord, Result, class_definition::JavaClassDefinition, field::JavaField, value::JavaValueCodec};
 
 #[derive(Clone)]
@@ -69,7 +67,7 @@ impl JavaClassInstance {
         let zero = iter::repeat_n(0, (field_size + 4) as _).collect::<Vec<_>>();
         core.write_bytes(ptr_fields, &zero)?;
 
-        let vtable_index = KtfJvmSupport::get_vtable_index(core, class)?;
+        let class_header = super::class_memory::encode(class.ptr_raw)?;
 
         write_generic(
             core,
@@ -79,9 +77,9 @@ impl JavaClassInstance {
                 ptr_class: class.ptr_raw,
             },
         )?;
-        write_generic(core, ptr_fields, (vtable_index * 4) << 5)?;
+        write_generic(core, ptr_fields, class_header)?;
 
-        tracing::trace!("Instantiate {}, vtable_index {vtable_index:#x} at {ptr_raw:#x}", class.name()?);
+        tracing::trace!("Instantiate {}, class_header {class_header:#x} at {ptr_raw:#x}", class.name()?);
 
         Ok(Self::from_raw(ptr_raw, core))
     }

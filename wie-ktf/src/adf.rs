@@ -12,31 +12,45 @@ use wie_util::{Result, WieError};
 
 pub struct KtfAdf {
     pub name: String,
+    pub version: String,
+    pub vendor: String,
     pub aid: String,
     pub pid: String,
     pub mclass: String,
     pub display_size: Option<(u32, u32)>,
+    pub access_level: Option<u32>,
 }
 
 impl KtfAdf {
     pub fn parse(data: &[u8]) -> Self {
         let mut name = String::new();
+        let mut version = String::new();
+        let mut vendor = String::new();
         let mut aid = String::new();
         let mut pid = String::new();
         let mut mclass = String::new();
         let mut display_size = None;
+        let mut access_level = None;
 
         let mut lines = data.split(|x| *x == b'\n');
 
         for line in &mut lines {
             if line.starts_with(b"Name:") {
                 name = EUC_KR.decode(&line[5..]).0.trim().to_string();
+            } else if line.starts_with(b"Ver:") {
+                version = EUC_KR.decode(&line[4..]).0.trim().to_string();
+            } else if line.starts_with(b"Vdr:") {
+                vendor = EUC_KR.decode(&line[4..]).0.trim().to_string();
             } else if line.starts_with(b"AID:") {
                 aid = String::from_utf8_lossy(&line[4..]).trim().into();
             } else if line.starts_with(b"PID:") {
                 pid = String::from_utf8_lossy(&line[4..]).trim().into();
             } else if line.starts_with(b"MClass:") {
                 mclass = String::from_utf8_lossy(&line[7..]).trim().into();
+            } else if line.starts_with(b"SLvl:") {
+                access_level = core::str::from_utf8(&line[5..])
+                    .ok()
+                    .and_then(|value| u32::from_str_radix(value.trim(), 16).ok());
             } else if line.starts_with(b"DisplaySize:") {
                 display_size = parse_display_size(&line[12..]);
             }
@@ -44,10 +58,13 @@ impl KtfAdf {
 
         Self {
             name,
+            version,
+            vendor,
             aid,
             pid,
             mclass,
             display_size,
+            access_level,
         }
     }
 }
@@ -136,6 +153,16 @@ mod tests {
         assert_eq!(KtfAdf::parse(b"DisplaySize:0*220\n").display_size, None);
         assert_eq!(KtfAdf::parse(b"DisplaySize:176*0\n").display_size, None);
         assert_eq!(KtfAdf::parse(b"DisplaySize:4294967296*220\n").display_size, None);
+    }
+
+    #[test]
+    fn access_level_is_the_declared_hex_mask_not_slvl2_or_a_fixed_grant() {
+        assert_eq!(KtfAdf::parse(b"SLvl:7CBDAFBC\nSLvl2:00000FFF\n").access_level, Some(0x7cbdafbc));
+        assert_eq!(KtfAdf::parse(b"SLvl: 00000040\r\n").access_level, Some(0x40));
+        assert_eq!(KtfAdf::parse(b"SLvl:00000000\n").access_level, Some(0));
+        for data in [b"".as_slice(), b"SLvl2:00000FFF\n", b"SLvl:invalid\n", b"SLvl:100000000\n"] {
+            assert_eq!(KtfAdf::parse(data).access_level, None);
+        }
     }
 
     #[test]

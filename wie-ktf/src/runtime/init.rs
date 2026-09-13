@@ -13,7 +13,7 @@ use crate::{
     emulator::IMAGE_BASE,
     runtime::{
         SVC_CATEGORY_INIT,
-        java::interface::{get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw},
+        java::interface::{get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw, java_throw_instance},
         svc_ids::InitSvcId,
         wipi_c::{interface::get_wipic_knl_interface, register_wipic_svc_handler},
     },
@@ -29,6 +29,7 @@ async fn handle_init_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result
     match InitSvcId::try_from(id)? {
         InitSvcId::GetInterface => get_interface(core, core.read_param(0)?).await?.write(core, lr),
         InitSvcId::JavaThrow => EmulatedFunction::call(&java_throw, core, jvm).await?.write(core, lr),
+        InitSvcId::JavaThrowInstance => EmulatedFunction::call(&java_throw_instance, core, jvm).await?.write(core, lr),
         InitSvcId::JavaCheckType => EmulatedFunction::call(&java_check_type, core, jvm).await?.write(core, lr),
         InitSvcId::JavaNew => EmulatedFunction::call(&java_new, core, jvm).await?.write(core, lr),
         InitSvcId::JavaArrayNew => EmulatedFunction::call(&java_array_new, core, jvm).await?.write(core, lr),
@@ -47,6 +48,10 @@ pub async fn load_native(
     ptr_current_jvm_thread_context: u32,
 ) -> Result<ExeInterfaceFunctions> {
     let bss_size = parse_bss_size(filename)?;
+
+    if u64::from(IMAGE_BASE) + data.len() as u64 + u64::from(bss_size) > u64::from(super::java::jvm_support::class_memory::BASE) {
+        return Err(WieError::FatalError("KTF native image overlaps the class metadata arena".into()));
+    }
 
     core.load(data, IMAGE_BASE, data.len() + bss_size as usize)?;
     super::java::jvm_support::KtfJvmSupport::set_native_image(core, IMAGE_BASE, data.len() as u32 + bss_size)?;
@@ -96,7 +101,9 @@ pub async fn load_native(
     let param_4 = InitParam4 {
         fn_get_interface: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::GetInterface)?,
         fn_java_throw: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaThrow)?,
-        unk1: 0,
+        // KTF AOT's athrow helper forwards an existing exception to offset +8.
+        // Offset +4 above constructs an exception from a class-name string.
+        unk1: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaThrowInstance)?,
         unk2: 0,
         fn_java_check_type: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaCheckType)?,
         fn_java_new: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaNew)?,

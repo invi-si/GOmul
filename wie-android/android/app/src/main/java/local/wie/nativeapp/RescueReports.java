@@ -10,8 +10,13 @@ import java.util.zip.*;
 final class RescueReports {
  static File latest(File files, String game) {
   File root=new File(files,"rescues");
-  if(game!=null){File f=new File(root,game+"/latest");return new File(f,"report.txt").isFile()?f:null;}
-  File result=null;File[] games=root.listFiles();if(games!=null)for(File folder:games){File f=new File(folder,"latest");if(new File(f,"report.txt").isFile()&&(result==null||f.lastModified()>result.lastModified()))result=f;}return result;
+  if(game!=null){File folder=new File(root,game);File automatic=new File(folder,"latest"),manual=new File(folder,"manual/latest");return newest(automatic,manual);}
+  File result=null;File[] games=root.listFiles();if(games!=null)for(File folder:games){File candidate=latest(files,folder.getName());result=newest(result,candidate);}return result;
+ }
+ private static File newest(File a,File b){
+  if(a!=null&&!new File(a,"report.txt").isFile())a=null;
+  if(b!=null&&!new File(b,"report.txt").isFile())b=null;
+  return a==null?b:b==null?a:a.lastModified()>=b.lastModified()?a:b;
  }
  static void export(File report, OutputStream output)throws IOException {
   try(ZipOutputStream zip=new ZipOutputStream(output)){

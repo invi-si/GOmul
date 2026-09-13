@@ -8,14 +8,23 @@ use crate::{
     core::{HEAP_BASE, HEAP_SIZE},
 };
 
-use self::{
-    bucket::{BUCKET_MAX, BucketAllocator},
-    list::ListAllocator,
-};
+use self::bucket::{BUCKET_MAX, BucketAllocator};
+pub use self::list::ListAllocator;
 
 pub struct Allocator;
 
 impl Allocator {
+    /// Usable heap capacity, excluding bucket metadata and unassigned slack.
+    pub fn total_memory() -> u32 {
+        ListAllocator::total_memory(HEAP_SIZE / 2) + BucketAllocator::total_memory()
+    }
+
+    /// Aggregate reusable bytes, not a promise of a single contiguous allocation.
+    /// Derived from guest metadata so checkpoint restore requires no host counters.
+    pub fn free_memory(core: &ArmCore) -> Result<u32> {
+        Ok(ListAllocator::free_memory(core, HEAP_BASE, HEAP_SIZE / 2)? + BucketAllocator::free_memory(core, HEAP_BASE + HEAP_SIZE / 2)?)
+    }
+
     pub fn init(core: &mut ArmCore) -> Result<()> {
         core.map(HEAP_BASE, HEAP_SIZE)?;
 
@@ -55,6 +64,28 @@ mod tests {
     use wie_util::Result;
 
     use crate::{Allocator, ArmCore};
+
+    #[test]
+    fn memory_reporting_tracks_both_pools_and_coalesces_free_runs() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        Allocator::init(&mut core)?;
+        let total = Allocator::total_memory();
+        assert_eq!(Allocator::free_memory(&core)?, total);
+        let small = Allocator::alloc(&mut core, 12)?;
+        assert_eq!(Allocator::free_memory(&core)?, total - 16);
+        let first = Allocator::alloc(&mut core, 1024)?;
+        let second = Allocator::alloc(&mut core, 2048)?;
+        assert_eq!(Allocator::free_memory(&core)?, total - 16 - 1032 - 2056);
+        Allocator::free(&mut core, first, 1024)?;
+        assert_eq!(Allocator::free_memory(&core)?, total - 16 - 2056 - 8);
+        Allocator::free(&mut core, second, 2048)?;
+        Allocator::free(&mut core, small, 12)?;
+        assert_eq!(Allocator::free_memory(&core)?, total);
+        // Invalid guest metadata must error instead of looping or reporting nonsense.
+        wie_util::write_generic(&mut core, crate::core::HEAP_BASE, 0u32)?;
+        assert!(Allocator::free_memory(&core).is_err());
+        Ok(())
+    }
 
     #[test]
     fn allocation_status_tracks_bucket_and_list_allocations() -> Result<()> {

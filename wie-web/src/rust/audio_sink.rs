@@ -3,7 +3,7 @@ use wasm_bindgen::prelude::*;
 
 use wie_backend::{AudioCommand, AudioEventData};
 
-#[wasm_bindgen(module = "midi.ts")]
+#[wasm_bindgen(module = "/src/ts/wasm_audio.ts")]
 extern "C" {
     #[derive(Clone)]
     pub type AudioPlayer;

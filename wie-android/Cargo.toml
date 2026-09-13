@@ -8,7 +8,14 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "gomul-local"
+path = "src/bin/gomul-local.rs"
+required-features = ["local-web"]
+
 [features]
+local-web = ["dep:serde_json", "dep:base64"]
+compatibility-audit = ["frame-diagnostics", "rescue-replay", "wie-core-arm/cpu-boundary-trace"]
 rescue-replay = []
 cpu-transcript-capture = ["cpu-replay", "wie-core-arm/cpu-transcript-capture", "wie-ktf/cpu-transcript-capture", "wie-lgt/cpu-transcript-capture"]
 input-trace = ["wie-util/input-trace", "wie-backend/input-trace", "dep:libc", "dep:serde_json"]
@@ -19,6 +26,7 @@ experimental-thumb-table = ["wie-lgt/experimental-thumb-table"]
 native-cpu-bench = ["dep:wie-cpu-bench"]
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
 anyhow.workspace = true
 sha2 = "0.10"
 libc = { version = "0.2", optional = true }

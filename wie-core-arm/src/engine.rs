@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 mod arm32_cpu;
 #[cfg(feature = "cpu-replay")]
 pub use arm32_cpu::replay as cpu_replay;
@@ -25,6 +27,7 @@ pub trait ArmEngine: Send + AsAny {
     fn mem_map(&mut self, address: u32, size: usize, permission: MemoryPermission);
     fn mem_write(&mut self, address: u32, data: &[u8]) -> Result<()>;
     fn mem_read(&mut self, address: u32, size: usize, result: &mut [u8]) -> Result<usize>;
+    fn mem_read_c_string(&mut self, address: u32) -> Result<Vec<u8>>;
     fn is_mapped(&self, address: u32, size: usize) -> bool;
 }
 

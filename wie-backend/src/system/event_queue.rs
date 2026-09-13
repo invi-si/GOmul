@@ -116,6 +116,30 @@ mod tests {
     }
 
     #[test]
+    fn redraw_coalescing_preserves_keys_timers_and_reentrant_requests() {
+        let mut queue = EventQueue::new();
+        queue.push(Event::Redraw);
+        queue.push(Event::Keydown(KeyCode::LEFT));
+        let due = crate::Instant::from_epoch_millis(123);
+        queue.push(Event::timer(due, || async { Ok(()) }));
+        for _ in 0..100 {
+            queue.push(Event::Redraw);
+        }
+        queue.push(Event::Keyup(KeyCode::LEFT));
+        assert!(matches!(queue.pop(), Some(Event::Redraw)));
+        // Painting may request another repaint; it belongs after existing work.
+        queue.push(Event::Redraw);
+        queue.push(Event::Redraw);
+        assert!(matches!(queue.pop(), Some(Event::Keydown(KeyCode::LEFT))));
+        assert!(matches!(queue.pop(), Some(Event::Timer { due: actual, .. }) if actual == due));
+        assert!(matches!(queue.pop(), Some(Event::Keyup(KeyCode::LEFT))));
+        assert!(matches!(queue.pop(), Some(Event::Redraw)));
+        assert!(queue.pop().is_none());
+        #[cfg(feature = "input-trace")]
+        assert!(queue.trace_ids.is_empty());
+    }
+
+    #[test]
     fn parse_phone_function_keys() {
         assert_eq!(KeyCode::parse("CALL"), KeyCode::CALL);
         assert_eq!(KeyCode::parse("HANGUP"), KeyCode::HANGUP);
@@ -128,11 +152,20 @@ type TimerCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<bool
 
 pub enum Event {
     Redraw,
+    /// Emulator text-entry preference, consumed before guest key callbacks.
+    TextInputMode(bool),
     Keydown(KeyCode),
     Keyup(KeyCode),
     Keyrepeat(KeyCode),
-    Timer { due: Instant, callback: TimerCallback },
-    Notify { r#type: i32, param1: i32, param2: i32 }, // wipi notifyEvent
+    Timer {
+        due: Instant,
+        callback: TimerCallback,
+    },
+    Notify {
+        r#type: i32,
+        param1: i32,
+        param2: i32,
+    }, // wipi notifyEvent
 }
 
 impl Event {
@@ -201,6 +234,12 @@ impl EventQueue {
 
     /// The identity is diagnostic only; timers retain it when deferred/reinserted.
     pub fn push_traced(&mut self, event: Event, previous_id: TraceEventId) {
+        // Redraw is a full-display invalidation, not a separate frame payload.
+        // Keep the first notification in FIFO order; another request is needed
+        // only after it has been popped (including requests made during paint).
+        if matches!(event, Event::Redraw) && self.events.iter().any(|pending| matches!(pending, Event::Redraw)) {
+            return;
+        }
         #[cfg(feature = "input-trace")]
         {
             use wie_util::input_trace as trace;
@@ -275,6 +314,7 @@ impl Event {
             Self::Keyrepeat(_) => 4,
             Self::Timer { .. } => 5,
             Self::Notify { .. } => 6,
+            Self::TextInputMode(_) => 7,
         }
     }
 }

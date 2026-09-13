@@ -35,7 +35,7 @@ impl JavaArrayClassDefinition {
         let java_lang_object = jvm.resolve_class("java/lang/Object").await.unwrap();
         let java_lang_object_raw = KtfJvmSupport::class_definition_raw(&*java_lang_object.definition)?;
 
-        let ptr_raw = Allocator::alloc(core, size_of::<RawJavaClass>() as u32)?;
+        let ptr_raw = super::class_memory::allocate(core)?;
 
         let element_type_name = &name[1..];
         let element_type_raw = if element_type_name.starts_with('L') {

@@ -121,10 +121,10 @@ impl Font {
             .await
     }
 
-    async fn get_baseline_position(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Font::getBaselinePosition({this:?})");
-
-        Ok(0)
+    async fn get_baseline_position(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        let midp_font = jvm.get_field(&this, "midpFont", "Ljavax/microedition/lcdui/Font;").await?;
+        jvm.invoke_virtual(&midp_font, "javax/microedition/lcdui/Font", "getBaselinePosition", "()I", ())
+            .await
     }
 
     async fn get_face(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
@@ -328,7 +328,7 @@ mod test {
             assert_eq!(
                 jvm.invoke_virtual::<_, i32>(&font, "org/kwis/msp/lcdui/Font", "getBaselinePosition", "()I", ())
                     .await?,
-                0
+                10
             );
 
             Ok(())

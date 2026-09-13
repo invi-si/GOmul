@@ -4,6 +4,11 @@ Rescue automatically preserves failure evidence when the native emulator returns
 an error or its worker unwinds with a Rust panic. It does not navigate away from
 the game, reload it, send data over the network, or overwrite Quick Save.
 
+For a frozen/loading-loop screen without a crash, select **Settings → Create
+Rescue ZIP**, then choose where to save it. The capture reads existing recording
+evidence directly without waiting for the guest worker to process a command.
+It neither forces a crash nor replaces Quick Save. The app UI must still respond.
+
 The error panel offers **Export rescue**, **Return to library**, and **Stay here**.
 The library also offers **Export last rescue** after a report exists. Export uses
 the Android document picker and creates one ZIP containing:
@@ -12,7 +17,9 @@ the Android document picker and creates one ZIP containing:
   original binary `frame`. A failure before the first frame has no screenshot.
 - `error.txt`, emulator `build-id`, and SHA-256 game `archive-id` (binary digest).
 - Initial saved-data tree and existing session recording through the observed
-  failure (`trace`). This is the same host-event recording used by Quick Save.
+  failure or manual capture (`trace`). This is the same host-event recording used
+  by Quick Save. A manual report is explicitly labeled and may contain a partial
+  in-progress tick; its `safe-trace` remains the last completed tick.
 - `safe-trace`: the recording prefix ending after the last successful tick.
   No user quick save is needed to preserve this diagnostic prefix.
 - `recording-status.txt`, including recording exhaustion/divergence when present.
@@ -39,8 +46,11 @@ compatibility with the candidate. A pre-crash boundary may already contain
 corruption, and a completed tick does not prove a healthy guest state.
 
 Intentional library exits, Android pauses and the guest's normal exit API do not
-produce reports. Hard process kills, native aborts, OS kills and hangs cannot be
-caught by this mechanism. A disk/storage failure may prevent capture; the UI
+automatically produce reports. Manual capture also works for an existing paused
+or stopped session. Hard process kills, native aborts, OS kills and a completely
+unresponsive app cannot be captured through the button. If an evidence lock is
+busy, manual capture returns a retry message instead of waiting indefinitely.
+A disk/storage failure may prevent capture; the UI
 then says no report was captured. Existing recording limits still apply (64 MiB).
 
 Reports live outside saves and checkpoints at `files/rescues/<game-id>/latest`.
@@ -51,6 +61,14 @@ persisted per tick: the existing recording continues, with a small bookmark
 compression, guest scheduling, timers or refresh caps. On failure, recording
 and file copies can take time; the panel appears after capture finishes.
 
+Manual reports use the separate `files/rescues/<game-id>/manual/latest` path,
+also retaining one previous report. They do not consume or overwrite the automatic
+failure report. The library's **Export last rescue** considers both kinds. Export
+prepares a ZIP in app cache before opening the document picker, so a later capture
+cannot replace the report while the user is choosing a destination. Temporary
+export ZIPs are removed after saving or cancelling. No per-tick disk writes or
+extra scene snapshots were added.
+
 ## Validation
 
 - Rust tests: safe prefix survives compressed-clock mutation and a failed tick;
@@ -60,6 +78,11 @@ and file copies can take time; the panel appears after capture finishes.
 - Android instrumentation uses only synthetic files: verifies exported PNG
   dimensions/colors, triggers a real native worker error with a malformed JAR,
   checks automatic report creation, and verifies stop does not duplicate it.
+- Manual-capture tests cover an absent/non-servicing worker, busy recording/frame
+  locks, an unfinished tick, repeated capture, per-game isolation and preservation
+  of automatic reports and Quick Saves. A separate Android instrumentation mode
+  tests native manual capture and ZIP contents with a non-crashed, paused game
+  using disposable app-cache saves.
 - No game-specific gameplay compatibility or performance claim is made.
 
 Next stage: add a developer report-import/replay runner and verify representative

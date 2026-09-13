@@ -1,12 +1,20 @@
 #![no_std]
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod audio_sink;
+mod clock;
 #[cfg(feature = "cpu-profiling")]
 mod cpu_profile;
 mod database;
 mod filesystem;
+#[cfg(not(test))]
 mod indexed_db_store;
+#[cfg(test)]
+#[path = "test_store.rs"]
+mod indexed_db_store;
+mod launch_setup;
 mod util;
 mod window;
 
@@ -14,12 +22,13 @@ use alloc::{
     borrow::ToOwned,
     boxed::Box,
     collections::BTreeMap,
+    rc::Rc,
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
 };
 use core::{
-    str,
+    cell::RefCell,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -27,7 +36,6 @@ use hashbrown::HashMap;
 use tracing_subscriber::{Layer, filter::LevelFilter, fmt::time::UtcTime, layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_web::MakeConsoleWriter;
 use wasm_bindgen::{JsError, prelude::*};
-use web_sys::HtmlCanvasElement;
 
 use wie_backend::{Emulator, Event, Font, Instant, KeyCode, Options, Platform, Screen, extract_zip};
 use wie_j2me::J2MEEmulator;
@@ -42,14 +50,34 @@ use self::{
     window::WindowImpl,
 };
 
+#[derive(Clone, Copy)]
 enum ArchivePlatform {
     Ktf,
     Lgt,
     Skt,
 }
 
+fn normalize_archive_root(files: BTreeMap<String, Vec<u8>>) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+    let roots: alloc::collections::BTreeSet<_> = files
+        .keys()
+        .filter_map(|path| {
+            let (parent, leaf) = path.rsplit_once('/').unwrap_or(("", path));
+            matches!(leaf, "app_info" | "__adf__").then_some(parent)
+        })
+        .collect();
+    anyhow::ensure!(roots.len() <= 1, "한 게임이 포함된 ZIP을 선택하세요.");
+    let prefix = roots.first().filter(|root| !root.is_empty()).map(|root| alloc::format!("{root}/"));
+    match prefix {
+        Some(prefix) => Ok(files
+            .into_iter()
+            .filter_map(|(path, data)| path.strip_prefix(&prefix).map(|name| (name.to_owned(), data)))
+            .collect()),
+        None => Ok(files),
+    }
+}
+
 fn parse_archive(buf: &[u8]) -> anyhow::Result<(ArchivePlatform, BTreeMap<String, Vec<u8>>)> {
-    let files = extract_zip(buf)?;
+    let files = normalize_archive_root(extract_zip(buf)?)?;
 
     if !files.keys().any(|name| name.to_ascii_lowercase().ends_with(".jar")) {
         anyhow::bail!("Archive does not contain a JAR file");
@@ -77,6 +105,8 @@ fn jar_app_id<'a>(filename: &'a str, buf: &[u8]) -> &'a str {
 }
 
 struct WieWebPlatform {
+    phone_number: Option<String>,
+    clock: Rc<RefCell<clock::GuestClock>>,
     audio_player: AudioPlayer,
     database_repository: DatabaseRepository,
     filesystem: WebFilesystem,
@@ -90,11 +120,21 @@ unsafe impl Sync for WieWebPlatform {}
 unsafe impl Send for WieWebPlatform {}
 
 impl WieWebPlatform {
-    fn new(window: WindowImpl, font: Font, audio_player: AudioPlayer, exited: Arc<AtomicBool>) -> Self {
+    fn new(
+        window: WindowImpl,
+        font: Font,
+        audio_player: AudioPlayer,
+        exited: Arc<AtomicBool>,
+        namespace: String,
+        phone_number: Option<String>,
+        clock: Rc<RefCell<clock::GuestClock>>,
+    ) -> Self {
         Self {
+            phone_number,
+            clock,
             audio_player,
-            database_repository: DatabaseRepository::new(),
-            filesystem: WebFilesystem::new(),
+            database_repository: DatabaseRepository::new(namespace.clone()),
+            filesystem: WebFilesystem::new(namespace),
             font,
             window,
             exited,
@@ -103,6 +143,9 @@ impl WieWebPlatform {
 }
 
 impl Platform for WieWebPlatform {
+    fn phone_number(&self) -> Option<&str> {
+        self.phone_number.as_deref()
+    }
     fn font(&self) -> &Font {
         &self.font
     }
@@ -112,7 +155,7 @@ impl Platform for WieWebPlatform {
     }
 
     fn now(&self) -> Instant {
-        let millis = js_sys::Date::now();
+        let millis = self.clock.borrow().now(js_sys::Date::now());
 
         Instant::from_epoch_millis(millis as _)
     }
@@ -130,12 +173,12 @@ impl Platform for WieWebPlatform {
     }
 
     fn write_stdout(&self, data: &[u8]) {
-        let string = str::from_utf8(data).unwrap();
+        let string = String::from_utf8_lossy(data);
         tracing::info!("{}", string);
     }
 
     fn write_stderr(&self, data: &[u8]) {
-        let string = str::from_utf8(data).unwrap();
+        let string = String::from_utf8_lossy(data);
         tracing::info!("{}", string);
     }
 
@@ -160,6 +203,7 @@ impl Platform for WieWebPlatform {
 
 #[wasm_bindgen]
 pub struct WieWeb {
+    clock: Rc<RefCell<clock::GuestClock>>,
     emulator: Box<dyn Emulator>,
     audio_player: AudioPlayer,
     should_redraw: Arc<AtomicBool>,
@@ -248,17 +292,77 @@ fn read_app_metadata(filename: &str, buf: &[u8]) -> anyhow::Result<ImportedAppMe
     })
 }
 
+#[wasm_bindgen(js_name = prepareLaunch)]
+pub async fn prepare_launch(filename: &str, buf: &[u8], namespace: &str, settings_json: Option<String>) -> Result<String, JsError> {
+    use wie_backend::DatabaseRepository as _;
+    let result = async {
+        let settings = launch_setup::LaunchSettings::parse(settings_json.as_deref())?;
+        let mut profile = launch_setup::LaunchProfile::default();
+        if filename.to_ascii_lowercase().ends_with(".zip") {
+            let (kind, files) = parse_archive(buf)?;
+            let pid = match kind {
+                ArchivePlatform::Ktf => KtfEmulator::archive_id(&files),
+                ArchivePlatform::Lgt => LgtEmulator::archive_id(&files),
+                ArchivePlatform::Skt => SktEmulator::archive_id(&files),
+            }
+            .unwrap_or_default();
+            let (detected, records) = launch_setup::inspect(&files, &pid)?;
+            profile = detected;
+            if settings.phone_number.is_some() {
+                profile.phone_number = settings.phone_number.clone();
+            }
+            // KTF's shared loader already imports P/ and dense Java record stores.
+            // Android's companion importer additionally materializes these LGT records.
+            if matches!(kind, ArchivePlatform::Lgt) && !records.is_empty() {
+                anyhow::ensure!(profile.phone_number.is_some(), "게임 설정에서 함께 제공된 11자리 전화번호를 입력하세요.");
+                let repository = DatabaseRepository::new(namespace.to_string());
+                for (name, data) in records {
+                    if !repository.exists(&name, &pid).await {
+                        anyhow::ensure!(
+                            repository.open(&name, &pid).await.set(1, &data).await,
+                            "초기 데이터를 저장하지 못했습니다."
+                        );
+                    }
+                }
+            }
+        }
+        if settings.phone_number.is_some() {
+            profile.phone_number = settings.phone_number;
+        }
+        anyhow::Ok(serde_json::to_string(&profile)?)
+    }
+    .await;
+    result.map_err(|e| JsError::new(&e.to_string()))
+}
+
 #[wasm_bindgen]
 impl WieWeb {
     #[wasm_bindgen(constructor)]
-    pub fn new(filename: &str, buf: &[u8], canvas: HtmlCanvasElement, font_data: Vec<u8>) -> Result<WieWeb, JsError> {
+    pub fn new(
+        filename: &str,
+        buf: &[u8],
+        canvas: JsValue,
+        font_data: Vec<u8>,
+        storage_namespace: Option<String>,
+        settings_json: Option<String>,
+    ) -> Result<WieWeb, JsError> {
         let audio_player = AudioPlayer::new();
         let result = (|| {
+            let settings = launch_setup::LaunchSettings::parse(settings_json.as_deref())?;
+            let clock = Rc::new(RefCell::new(clock::GuestClock::new(js_sys::Date::now())));
             let should_redraw = Arc::new(AtomicBool::new(true));
             let exited = Arc::new(AtomicBool::new(false));
-            let window = WindowImpl::new(canvas, should_redraw.clone());
+            let window = WindowImpl::new(canvas, should_redraw.clone(), settings.display());
             let font = Font::try_from_vec(font_data)?;
-            let platform = Box::new(WieWebPlatform::new(window, font, audio_player.clone(), exited.clone()));
+            let platform = Box::new(WieWebPlatform::new(
+                window,
+                font,
+                audio_player.clone(),
+                exited.clone(),
+                storage_namespace.unwrap_or_default(),
+                settings.phone_number,
+                clock.clone(),
+            ));
             let options = Options {
                 enable_gdbserver: false,
                 profile: None,
@@ -312,6 +416,7 @@ impl WieWeb {
             };
 
             anyhow::Ok(Self {
+                clock,
                 emulator,
                 audio_player: audio_player.clone(),
                 should_redraw,
@@ -393,6 +498,14 @@ impl WieWeb {
         Ok(())
     }
 
+    pub fn set_speed(&mut self, rate: u32) {
+        self.clock.borrow_mut().set_speed(js_sys::Date::now(), rate);
+    }
+
+    pub fn set_text_input_mode(&mut self, korean: bool) {
+        self.emulator.handle_event(Event::TextInputMode(korean));
+    }
+
     pub fn set_pcm_volume(&self, volume: f32) {
         audio_sink::set_pcm_volume(volume);
     }
@@ -450,6 +563,31 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::read_app_metadata;
+
+    #[test]
+    fn carrier_root_normalization_preserves_data_and_rejects_multiple_games() {
+        use super::normalize_archive_root;
+        use alloc::{collections::BTreeMap, string::ToString, vec};
+        for marker in ["app_info", "__adf__"] {
+            let entries = BTreeMap::from([
+                (alloc::format!("wrapper/game/{marker}"), vec![1]),
+                ("wrapper/game/test.jar".to_string(), vec![2, 3]),
+                ("wrapper/game/P/prefs".to_string(), vec![4, 5]),
+                ("wrapper/game2/readme.txt".to_string(), vec![6]),
+            ]);
+            let normalized = normalize_archive_root(entries).unwrap();
+            assert_eq!(normalized.len(), 3);
+            assert_eq!(normalized[marker], vec![1]);
+            assert_eq!(normalized["test.jar"], vec![2, 3]);
+            assert_eq!(normalized["P/prefs"], vec![4, 5]);
+            assert_eq!(normalize_archive_root(normalized.clone()).unwrap(), normalized);
+        }
+        for (a, b) in [("a/__adf__", "b/__adf__"), ("app_info", "b/__adf__"), ("a/app_info", "b/app_info")] {
+            assert!(normalize_archive_root(BTreeMap::from([(a.to_string(), vec![1]), (b.to_string(), vec![2])])).is_err());
+        }
+        let plain = BTreeMap::from([("META-INF/MANIFEST.MF".to_string(), vec![1])]);
+        assert_eq!(normalize_archive_root(plain.clone()).unwrap(), plain);
+    }
 
     // Synthetic stored ZIP entries: no game code or assets.
     const NATIVE_JAR: &[u8] = b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00!\x00Q\xc4:\xa7\x04\x00\

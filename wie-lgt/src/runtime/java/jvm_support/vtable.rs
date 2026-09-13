@@ -180,6 +180,37 @@ impl JavaVtable {
             };
         }
 
+        // Some native ABI revisions expose the same method at multiple slots.
+        // Keep every explicitly declared slot backed by the same guest method.
+        for abi in &abi_classes {
+            for entry in &abi.vtable {
+                let Some(method) = methods
+                    .iter()
+                    .filter_map(|entry| entry.method.as_ref())
+                    .find(|method| method.name() == entry.name && method.descriptor() == entry.descriptor)
+                    .cloned()
+                else {
+                    continue;
+                };
+                if methods.len() <= entry.index {
+                    methods.resize(entry.index + 1, JavaVtableEntry { target: 0, method: None });
+                }
+                if methods[entry.index]
+                    .method
+                    .as_ref()
+                    .is_some_and(|other| other.name() != entry.name || other.descriptor() != entry.descriptor)
+                {
+                    return Err(WieError::FatalError(format!(
+                        "Conflicting LGT Java ABI alias for {class_name} at {}",
+                        entry.index
+                    )));
+                }
+                methods[entry.index] = JavaVtableEntry {
+                    target: method.target()?,
+                    method: Some(method),
+                };
+            }
+        }
         Ok(methods)
     }
 }

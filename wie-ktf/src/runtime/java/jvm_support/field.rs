@@ -64,6 +64,11 @@ impl JavaField {
         Ok(raw.offset_or_value)
     }
 
+    pub fn matches_name(&self, name: &str, descriptor: &str) -> Result<bool> {
+        let raw: RawJavaField = read_generic(&self.core, self.ptr_raw)?;
+        JavaFullName::matches(&self.core, raw.ptr_name, name, descriptor)
+    }
+
     pub fn static_address(&self) -> Result<u32> {
         let address = self.ptr_raw + 12; // offsetof offset_or_value
 

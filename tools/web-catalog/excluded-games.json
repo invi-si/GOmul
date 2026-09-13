@@ -1,0 +1,422 @@
+[
+  {
+    "carrier": "LGT",
+    "id": "213",
+    "title": "09대박맞고-왕후의길",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "198",
+    "title": "2008 베이징올림픽",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "230",
+    "title": "2010 밴쿠버올림픽",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "200",
+    "title": "KBO 프로야구2009",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "201",
+    "title": "SD한국전쟁",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "212",
+    "title": "당신은 골프왕",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "214",
+    "title": "데몬헌터",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "220",
+    "title": "리얼사커 매니저2009",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "231",
+    "title": "부루마불2009",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "236",
+    "title": "서든어택 포켓",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "238",
+    "title": "스파이더맨3",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "243",
+    "title": "월드장기체스",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "199",
+    "title": "정통맞고2009",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "251",
+    "title": "체스마스터",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "422",
+    "title": "턴",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "258",
+    "title": "하이브리드",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "259",
+    "title": "학교가는길",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "260",
+    "title": "현영맞고2006",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "LGT",
+    "id": "261",
+    "title": "훼미리마트 타이쿤",
+    "source": "docs/lgt-compatibility-20260912.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "423",
+    "title": "강호동맞고2",
+    "source": "docs/ktf-review-priorities.csv"
+  },
+  {
+    "carrier": "KTF",
+    "id": "146",
+    "title": "정통맞고2007",
+    "source": "docs/ktf-review-priorities.csv"
+  },
+  {
+    "carrier": "KTF",
+    "id": "408",
+    "title": "코에이 삼국지 영걸전",
+    "source": "docs/ktf-review-priorities.csv"
+  },
+  {
+    "carrier": "KTF",
+    "id": "192",
+    "title": "헬싱",
+    "source": "docs/ktf-review-priorities.csv"
+  },
+  {
+    "carrier": "KTF",
+    "id": "112",
+    "title": "알바전설 편의점2",
+    "source": "docs/ktf-review-priorities.csv"
+  },
+  {
+    "carrier": "KTF",
+    "id": "406",
+    "title": "2007루노베이스볼",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "430",
+    "title": "게임팩25",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "392",
+    "title": "광수의 똥!생각",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "9",
+    "title": "길거리농구3",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "171",
+    "title": "루빅스큐브",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "46",
+    "title": "리얼사커2007",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "47",
+    "title": "리얼사커2009",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "297",
+    "title": "슈렉3",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "100",
+    "title": "슈퍼리얼테니스",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "104",
+    "title": "스맥다운VS로우",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "105",
+    "title": "스파이더맨3",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "285",
+    "title": "스페셜포스",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "283",
+    "title": "엑스맨",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "120",
+    "title": "엑스맨3",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "186",
+    "title": "피파07",
+    "source": "docs/web-catalog-support-exclusions.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "402",
+    "title": "2006독일축구",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "138",
+    "title": "2006독일축구",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "403",
+    "title": "2006영혼낚시",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "11",
+    "title": "광란의 수족관",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "8",
+    "title": "귀신사냥2007",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "436",
+    "title": "데몬헌터",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "30",
+    "title": "데빌헌터",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "34",
+    "title": "두뇌게임Q",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "39",
+    "title": "라이덴3",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "95",
+    "title": "서든어택",
+    "source": "docs/web-reported-game-issues.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "405",
+    "title": "K-1 WGP 뉴챌린저",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "302",
+    "title": "나이트메이커",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "382",
+    "title": "다마고치M",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "371",
+    "title": "닥터K",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "372",
+    "title": "당신은 골프왕",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "375",
+    "title": "댄스배틀 오디션",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "73",
+    "title": "미니고치",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "299",
+    "title": "미니고치",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "SKT",
+    "id": "446",
+    "title": "삼국지연의2",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "91",
+    "title": "삼국축구대전",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "107",
+    "title": "신시티2",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "108",
+    "title": "심시티",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "117",
+    "title": "얼음낚시",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "142",
+    "title": "장금이의 꿈",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "158",
+    "title": "카우스블레이드",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "161",
+    "title": "컴투스사커2006",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "162",
+    "title": "컴투스포춘골프 3D",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "174",
+    "title": "테트리스2006",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "176",
+    "title": "트랜스포머",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "182",
+    "title": "프리스타일 어택",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  },
+  {
+    "carrier": "KTF",
+    "id": "190",
+    "title": "해적왕2007",
+    "source": "docs/android-reported-game-issues-20260913.md"
+  }
+]

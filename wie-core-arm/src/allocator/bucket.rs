@@ -47,6 +47,24 @@ const fn total_size() -> usize {
 pub struct BucketAllocator;
 
 impl BucketAllocator {
+    pub fn total_memory() -> u32 {
+        BUCKETS.iter().map(|(size, count)| (size * count) as u32).sum()
+    }
+
+    pub fn free_memory(core: &ArmCore, base: u32) -> Result<u32> {
+        let mut free = 0;
+        let mut bytes = [0u8; 4096];
+        for (index, (size, _)) in BUCKETS.iter().enumerate() {
+            let address = base + region_offset(index) as u32;
+            for offset in (0..header_length(index)).step_by(bytes.len()) {
+                let length = bytes.len().min(header_length(index) - offset);
+                core.read_bytes(address + offset as u32, &mut bytes[..length])?;
+                free += bytes[..length].iter().map(|b| b.count_ones() * *size as u32).sum::<u32>();
+            }
+        }
+        Ok(free)
+    }
+
     pub fn init(core: &mut ArmCore, base_address: u32, base_size: u32) -> Result<()> {
         // header contains bitset of allocation, 1 is unallocated, 0 is allocated
 

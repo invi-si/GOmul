@@ -33,6 +33,9 @@ pub async fn get_class(context: &mut dyn WIPICContext, psz: u32) -> Result<WIPIC
         _ => (-1i32) as u32,
     }))
 }
+pub fn is_application_context(context: &dyn WIPICContext, pac: u32) -> Result<bool> {
+    Ok(pac != 0 && read_generic::<u32, _>(context, context.data_ptr(WIPICIndirectPtr(pac))?)? == CONTEXT)
+}
 pub async fn create(context: &mut dyn WIPICContext, pac: u32, cls: u32) -> Result<WIPICIndirectPtr> {
     if ![TEXT, DATE].contains(&cls) || pac == 0 {
         return Ok(WIPICIndirectPtr(u32::MAX));

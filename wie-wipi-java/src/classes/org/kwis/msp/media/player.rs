@@ -48,6 +48,13 @@ impl Player {
                     Self::record,
                     MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC,
                 ),
+                // Older callers link the Clip overload by its exact descriptor.
+                JavaMethodProto::new(
+                    "resume",
+                    "(Lorg/kwis/msp/media/Clip;)Z",
+                    Self::resume,
+                    MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC,
+                ),
                 JavaMethodProto::new(
                     "play",
                     "(Lorg/kwis/msp/media/Clip;Z)Z",
@@ -140,6 +147,43 @@ mod test {
     };
 
     #[test]
+    fn test_null_clip_is_guest_exception_and_empty_clip_is_not_playing() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            for operation in ["play", "stop"] {
+                let clip: ClassInstanceRef<Clip> = None.into();
+                let result: jvm::Result<bool> = if operation == "play" {
+                    jvm.invoke_static("org/kwis/msp/media/Player", operation, "(Lorg/kwis/msp/media/Clip;Z)Z", (clip, false))
+                        .await
+                } else {
+                    jvm.invoke_static("org/kwis/msp/media/Player", operation, "(Lorg/kwis/msp/media/Clip;)Z", (clip,))
+                        .await
+                };
+                let Err(jvm::JavaError::JavaException(exception)) = result else {
+                    panic!("null clip must raise a guest exception");
+                };
+                assert!(jvm.is_instance(&*exception, "java/lang/NullPointerException"));
+            }
+            // A real Clip without loaded media is distinct from a null Clip.
+            let kind = JavaLangString::from_rust_string(&jvm, "audio/test").await?;
+            let clip: ClassInstanceRef<Clip> = jvm.new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (kind,)).await?.into();
+            let played: bool = jvm
+                .invoke_static(
+                    "org/kwis/msp/media/Player",
+                    "play",
+                    "(Lorg/kwis/msp/media/Clip;Z)Z",
+                    (clip.clone(), false),
+                )
+                .await?;
+            let stopped: bool = jvm
+                .invoke_static("org/kwis/msp/media/Player", "stop", "(Lorg/kwis/msp/media/Clip;)Z", (clip,))
+                .await?;
+            assert!(!played);
+            assert!(!stopped);
+            Ok(())
+        })
+    }
+
+    #[test]
     fn test_base_clip_overloads_return_false() -> Result<()> {
         run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
             let clip: ClassInstanceRef<BaseClip> = jvm.new_class("org/kwis/msp/media/BaseClip", "()V", ()).await?.into();
@@ -176,10 +220,27 @@ mod test {
     }
 
     #[test]
+    fn test_clip_resume_overload_reports_unsupported() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let kind: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "audio/test").await?.into();
+            let clip: ClassInstanceRef<Clip> = jvm.new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (kind,)).await?.into();
+            for descriptor in ["(Lorg/kwis/msp/media/Clip;)Z", "(Lorg/kwis/msp/media/BaseClip;)Z"] {
+                let resumed: bool = jvm
+                    .invoke_static("org/kwis/msp/media/Player", "resume", descriptor, (clip.clone(),))
+                    .await?;
+                assert!(!resumed);
+                assert!(Clip::player(&jvm, &clip).await?.is_null());
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
     fn test_clip_playback_uses_repeat_overload() -> Result<()> {
         run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
             let r#type: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "audio/test").await?.into();
-            let data = jvm.instantiate_array("B", 0).await?;
+            let mut data = jvm.instantiate_array("B", 10).await?;
+            jvm.store_array(&mut data, 0, [77i8, 77, 77, 68, 0, 0, 0, 2, 0, 0]).await?;
             let clip: ClassInstanceRef<Clip> = jvm
                 .new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;[B)V", (r#type, data))
                 .await?

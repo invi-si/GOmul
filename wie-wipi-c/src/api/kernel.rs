@@ -16,7 +16,7 @@ use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes
 
 use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 
-pub use self::sprintf::sprintf;
+pub use self::sprintf::{sprintf, vsprintf};
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -45,8 +45,8 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
         "RSSILEVEL" => "30",
         "BATTERYLEVEL" => "100",
         "PHONEMODEL" => "Emulator",
-        "PHONENUMBER" => phone_number.as_deref().unwrap_or(""),
-        "MIN" => phone_number.as_deref().unwrap_or("01000000000"),
+        // Both aliases describe the same emulated subscriber identity.
+        "PHONENUMBER" | "MIN" => phone_number.as_deref().unwrap_or("01000000000"),
         "ANNUN_CALL" => "0",
         "ANNUN_SMS" => "0",
         "ANNUN_SILENT" => "0",
@@ -163,21 +163,23 @@ pub async fn unset_timer(context: &mut dyn WIPICContext, a0: WIPICWord) -> Resul
 pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlAlloc({size:#x})");
 
-    if size == 0 {
+    if size == 0 || size > i32::MAX as u32 {
         return Ok(WIPICIndirectPtr(0));
     }
 
-    context.alloc(size)
+    match context.alloc(size) {
+        Err(WieError::AllocationFailure) => Ok(WIPICIndirectPtr(0)),
+        result => result,
+    }
 }
 
 pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlCalloc({size:#x})");
 
-    if size == 0 {
-        return Ok(WIPICIndirectPtr(0));
+    let memory = alloc(context, size).await?;
+    if memory.0 == 0 {
+        return Ok(memory);
     }
-
-    let memory = context.alloc(size)?;
 
     let zero = iter::repeat_n(0, size as _).collect::<Vec<_>>();
     context.write_bytes(context.data_ptr(memory)?, &zero)?;
@@ -283,16 +285,12 @@ pub async fn sprintk(
     Ok(result.len() as _)
 }
 
-pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
-    tracing::warn!("stub MC_knlGetTotalMemory()");
-
-    Ok(0x100000) // TODO hardcoded
+pub async fn get_total_memory(context: &mut dyn WIPICContext) -> Result<i32> {
+    Ok(context.total_memory().min(i32::MAX as u32) as i32)
 }
 
-pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
-    tracing::warn!("stub MC_knlGetFreeMemory()");
-
-    Ok(0x100000) // TODO hardcoded
+pub async fn get_free_memory(context: &mut dyn WIPICContext) -> Result<i32> {
+    Ok(context.free_memory()?.min(i32::MAX as u32) as i32)
 }
 
 pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
@@ -364,7 +362,7 @@ mod test {
     }
 
     #[futures_test::test]
-    async fn test_get_system_property_min() -> Result<()> {
+    async fn test_default_phone_identity() -> Result<()> {
         let mut context = TestContext::with_system(wie_backend::System::new(
             Box::new(test_utils::TestPlatform::new()),
             "test",
@@ -374,11 +372,16 @@ mod test {
         let id = context.alloc_raw(16).unwrap();
         let out = context.alloc_raw(16).unwrap();
 
-        write_null_terminated_string_bytes(&mut context, id, b"MIN").unwrap();
-
-        assert_eq!(get_system_property(&mut context, id, out, 16).await.unwrap(), 0);
-        let result = read_null_terminated_string_bytes(&context, out).unwrap();
-        assert_eq!(String::from_utf8(result).unwrap(), "01000000000");
+        for name in [b"PHONENUMBER".as_slice(), b"MIN".as_slice()] {
+            write_null_terminated_string_bytes(&mut context, id, name)?;
+            context.write_bytes(out, &[0xa5; 16])?;
+            assert_eq!(get_system_property(&mut context, id, out, 11).await?, -18);
+            let mut unchanged = [0; 16];
+            context.read_bytes(out, &mut unchanged)?;
+            assert_eq!(unchanged, [0xa5; 16]);
+            assert_eq!(get_system_property(&mut context, id, out, 12).await?, 0);
+            assert_eq!(read_null_terminated_string_bytes(&context, out)?, b"01000000000");
+        }
 
         Ok(())
     }
@@ -415,6 +418,26 @@ mod test {
         assert_eq!(calloc(&mut context, 0).await.unwrap().0, 0);
         assert_eq!(free(&mut context, wipi_types::wipic::WIPICIndirectPtr(0)).await.unwrap().0, 0);
 
+        Ok(())
+    }
+
+    #[futures_test::test]
+    async fn allocation_exhaustion_returns_null_without_writing_or_consuming_memory() -> Result<()> {
+        let mut context = TestContext::new();
+        let live = alloc(&mut context, 16).await?;
+        context.write_bytes(live.0, &[0x5a; 16])?;
+        let remaining = context.free_memory()?;
+        for size in [remaining + 1, i32::MAX as u32, u32::MAX] {
+            context.reset_io_counts();
+            assert_eq!(alloc(&mut context, size).await?.0, 0);
+            assert_eq!(calloc(&mut context, size).await?.0, 0);
+            assert_eq!(context.free_memory()?, remaining);
+            assert_eq!(context.io_counts(), (0, 0));
+        }
+        let mut bytes = [0; 16];
+        context.read_bytes(live.0, &mut bytes)?;
+        assert_eq!(bytes, [0x5a; 16]);
+        assert_ne!(calloc(&mut context, 8).await?.0, 0);
         Ok(())
     }
 

@@ -230,6 +230,11 @@ impl Clip {
     }
 
     pub async fn player(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Player>> {
+        // Dereferencing ClassInstanceRef before the JVM sees it would panic in Rust.
+        // Preserve a guest exception so the application's handler can run.
+        if this.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "clip is null").await);
+        }
         jvm.get_field(this, "player", "Ljavax/microedition/media/Player;").await
     }
 }
@@ -283,8 +288,8 @@ mod test {
                 .into();
 
             let data_type = JavaLangString::from_rust_string(&jvm, "audio/data").await?;
-            let mut data = jvm.instantiate_array("B", 3).await?;
-            jvm.store_array(&mut data, 0, [1i8, 2, 3]).await?;
+            let mut data = jvm.instantiate_array("B", 10).await?;
+            jvm.store_array(&mut data, 0, [77i8, 77, 77, 68, 0, 0, 0, 2, 0, 0]).await?;
             let data_clip: ClassInstanceRef<Clip> = jvm
                 .new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;[B)V", (data_type, data))
                 .await?

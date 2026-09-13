@@ -115,6 +115,9 @@ impl Display {
                 JavaMethodProto::new("disablePaint", "()V", Self::disable_paint, MethodAccessFlags::empty()),
             ],
             fields: vec![
+                JavaFieldProto::new("nativeInput", "I", FieldAccessFlags::PRIVATE | FieldAccessFlags::STATIC),
+                JavaFieldProto::new("koreanInput", "Z", FieldAccessFlags::PRIVATE | FieldAccessFlags::STATIC),
+                JavaFieldProto::new("inputModeEpoch", "I", FieldAccessFlags::PRIVATE | FieldAccessFlags::STATIC),
                 JavaFieldProto::new("isInFullScreenMode", "Z", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("currentDisplayable", "Ljavax/microedition/lcdui/Displayable;", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("screenImage", "Ljavax/microedition/lcdui/Image;", FieldAccessFlags::PRIVATE),
@@ -123,6 +126,10 @@ impl Display {
                 JavaFieldProto::new("height", "I", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("paintDisabled", "Z", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("repaintPending", "Z", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("nativePainter", "Ljava/lang/Runnable;", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("nativeRepaintPending", "Z", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("nativePaintActive", "Z", FieldAccessFlags::PRIVATE),
+                JavaFieldProto::new("nativeScreenOwned", "Z", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("alertGeneration", "I", FieldAccessFlags::PRIVATE),
                 JavaFieldProto::new("tickerGeneration", "I", FieldAccessFlags::PRIVATE),
             ],
@@ -789,7 +796,18 @@ impl Display {
         tracing::debug!("javax.microedition.lcdui.Display::handlePaintEvent({this:?})");
 
         // Repaints requested during painting belong to the next cycle.
+        let repaint_pending: bool = jvm.get_field(&this, "repaintPending", "Z").await?;
         jvm.put_field(&mut this, "repaintPending", "Z", false).await?;
+        let native_repaint: bool = jvm.get_field(&this, "nativeRepaintPending", "Z").await?;
+        jvm.put_field(&mut this, "nativeRepaintPending", "Z", false).await?;
+        let native_owned: bool = jvm.get_field(&this, "nativeScreenOwned", "Z").await?;
+        // A delayed notification for an already-serviced request must not
+        // present again merely because native pixels still own the screen.
+        let native_cycle = native_repaint || (native_owned && repaint_pending);
+        jvm.put_field(&mut this, "nativePaintActive", "Z", native_cycle).await?;
+        if native_cycle {
+            jvm.put_field(&mut this, "paintDisabled", "Z", false).await?;
+        }
         let current_displayable: ClassInstanceRef<Displayable> = jvm
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
             .await?;
@@ -879,17 +897,24 @@ impl Display {
             }
         }
 
-        // HACK: disable paint for clet apps, as they handle paint by themselves
+        // An explicit native flush has already presented this paint cycle.
         let disable_paint: bool = jvm.get_field(&this, "paintDisabled", "Z").await?;
+        let native_active: bool = jvm.get_field(&this, "nativePaintActive", "Z").await?;
+        jvm.put_field(&mut this, "nativePaintActive", "Z", false).await?;
         if !disable_paint {
-            let screen_image: ClassInstanceRef<Image> = jvm.get_field(&this, "screenImage", "Ljavax/microedition/lcdui/Image;").await?;
-            let image = Image::image(jvm, &screen_image).await?;
+            let native_painter: ClassInstanceRef<Runnable> = jvm.get_field(&this, "nativePainter", "Ljava/lang/Runnable;").await?;
+            if native_active && !native_painter.is_null() {
+                let _: () = jvm.invoke_virtual(&native_painter, "java/lang/Runnable", "run", "()V", ()).await?;
+            } else {
+                let screen_image: ClassInstanceRef<Image> = jvm.get_field(&this, "screenImage", "Ljavax/microedition/lcdui/Image;").await?;
+                let image = Image::image(jvm, &screen_image).await?;
 
-            let platform = context.system().platform();
-            let screen = platform.screen();
+                let platform = context.system().platform();
+                let screen = platform.screen();
 
-            tracing::debug!("Display paint complete {this:?}");
-            screen.paint(&*image);
+                tracing::debug!("Display paint complete {this:?}");
+                screen.paint(&*image);
+            }
         }
         jvm.collect_garbage()?;
 
@@ -1074,6 +1099,11 @@ impl Display {
         tracing::debug!("javax.microedition.lcdui.Display::disablePaint({this:?})");
 
         jvm.put_field(&mut this, "paintDisabled", "Z", true).await?;
+        // A flush suppresses this cycle's second presentation, but native pixels
+        // remain the screen source for later Java repaint requests until actual
+        // Java screen drawing reclaims them. A presenter supplies that source.
+        let painter: ClassInstanceRef<Runnable> = jvm.get_field(&this, "nativePainter", "Ljava/lang/Runnable;").await?;
+        jvm.put_field(&mut this, "nativeScreenOwned", "Z", !painter.is_null()).await?;
 
         Ok(())
     }
@@ -1101,6 +1131,269 @@ mod test {
 
     struct ViewportScreen;
     struct RecordingCommandListener;
+    struct NativePresentationCanvas;
+
+    impl NativePresentationCanvas {
+        fn as_proto() -> WieJavaClassProto {
+            JavaClassProto {
+                name: "javax/microedition/lcdui/TestNativePresentationCanvas",
+                parent_class: Some("javax/microedition/lcdui/Canvas"),
+                interfaces: vec!["java/lang/Runnable"],
+                methods: vec![
+                    JavaMethodProto::new(
+                        "paint",
+                        "(Ljavax/microedition/lcdui/Graphics;)V",
+                        Self::paint,
+                        MethodAccessFlags::PROTECTED,
+                    ),
+                    JavaMethodProto::new("run", "()V", Self::run, MethodAccessFlags::PUBLIC),
+                ],
+                fields: vec![
+                    JavaFieldProto::new("paints", "I", FieldAccessFlags::PRIVATE),
+                    JavaFieldProto::new("presentations", "I", FieldAccessFlags::PRIVATE),
+                    JavaFieldProto::new("presentedPaint", "I", FieldAccessFlags::PRIVATE),
+                    JavaFieldProto::new("insidePaint", "Z", FieldAccessFlags::PRIVATE),
+                    JavaFieldProto::new("action", "I", FieldAccessFlags::PRIVATE),
+                ],
+                access_flags: ClassAccessFlags::PUBLIC,
+            }
+        }
+
+        async fn paint(
+            jvm: &Jvm,
+            _context: &mut WieJvmContext,
+            mut this: ClassInstanceRef<Self>,
+            graphics: ClassInstanceRef<Graphics>,
+        ) -> JvmResult<()> {
+            let presentations: i32 = jvm.get_field(&this, "presentations", "I").await?;
+            let paints: i32 = jvm.get_field(&this, "paints", "I").await?;
+            jvm.put_field(&mut this, "insidePaint", "Z", true).await?;
+            jvm.put_field(&mut this, "paints", "I", paints + 1).await?;
+            let mut display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+            // Reading or changing graphics state must not claim the screen pixels.
+            let _: () = jvm
+                .invoke_virtual(&graphics, "javax/microedition/lcdui/Graphics", "setClip", "(IIII)V", (0, 0, 10, 10))
+                .await?;
+            let _: () = jvm
+                .invoke_virtual(&graphics, "javax/microedition/lcdui/Graphics", "setColor", "(I)V", (0x112233,))
+                .await?;
+            match jvm.get_field::<i32>(&this, "action", "I").await? {
+                1 => {
+                    jvm.put_field(&mut this, "action", "I", 0).await?;
+                    request_native_repaint(jvm, &mut display).await?;
+                }
+                2 => {
+                    let _: () = jvm
+                        .invoke_virtual(&graphics, "javax/microedition/lcdui/Graphics", "fillRect", "(IIII)V", (0, 0, 1, 1))
+                        .await?;
+                }
+                3 => {
+                    let _: () = jvm
+                        .invoke_virtual(&display, "javax/microedition/lcdui/Display", "disablePaint", "()V", ())
+                        .await?;
+                }
+                4 => {
+                    let image: ClassInstanceRef<Image> = jvm
+                        .invoke_static(
+                            "javax/microedition/lcdui/Image",
+                            "createImage",
+                            "(II)Ljavax/microedition/lcdui/Image;",
+                            (1, 1),
+                        )
+                        .await?;
+                    let offscreen: ClassInstanceRef<Graphics> = jvm
+                        .invoke_virtual(
+                            &image,
+                            "javax/microedition/lcdui/Image",
+                            "getGraphics",
+                            "()Ljavax/microedition/lcdui/Graphics;",
+                            (),
+                        )
+                        .await?;
+                    let _: () = jvm
+                        .invoke_virtual(&offscreen, "javax/microedition/lcdui/Graphics", "fillRect", "(IIII)V", (0, 0, 1, 1))
+                        .await?;
+                }
+                _ => {}
+            }
+            assert_eq!(jvm.get_field::<i32>(&this, "presentations", "I").await?, presentations);
+            jvm.put_field(&mut this, "insidePaint", "Z", false).await
+        }
+
+        async fn run(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
+            assert!(
+                !jvm.get_field::<bool>(&this, "insidePaint", "Z").await?,
+                "presentation must follow the guest callback"
+            );
+            let paints: i32 = jvm.get_field(&this, "paints", "I").await?;
+            let presentations: i32 = jvm.get_field(&this, "presentations", "I").await?;
+            jvm.put_field(&mut this, "presentations", "I", presentations + 1).await?;
+            jvm.put_field(&mut this, "presentedPaint", "I", paints).await
+        }
+    }
+
+    fn native_presentation_protos() -> Box<[Box<[WieJavaClassProto]>]> {
+        Box::new([get_protos().into(), [NativePresentationCanvas::as_proto()].into()])
+    }
+
+    async fn native_presentation_fixture(jvm: &Jvm) -> JvmResult<(ClassInstanceRef<Display>, ClassInstanceRef<NativePresentationCanvas>)> {
+        let mut display: ClassInstanceRef<Display> = jvm.new_class("javax/microedition/lcdui/Display", "()V", ()).await?.into();
+        let canvas: ClassInstanceRef<NativePresentationCanvas> = jvm
+            .instantiate_class("javax/microedition/lcdui/TestNativePresentationCanvas")
+            .await?
+            .into();
+        let _: () = jvm
+            .invoke_special(&canvas, "javax/microedition/lcdui/Canvas", "<init>", "()V", ())
+            .await?;
+        let _: () = jvm
+            .invoke_virtual(&canvas, "javax/microedition/lcdui/Canvas", "setFullScreenMode", "(Z)V", (true,))
+            .await?;
+        let _: () = jvm
+            .invoke_virtual(
+                &display,
+                "javax/microedition/lcdui/Display",
+                "setCurrent",
+                "(Ljavax/microedition/lcdui/Displayable;)V",
+                (canvas.clone(),),
+            )
+            .await?;
+        jvm.put_field(&mut display, "nativePainter", "Ljava/lang/Runnable;", canvas.clone())
+            .await?;
+        let mut graphics: ClassInstanceRef<Graphics> = jvm.get_field(&display, "screenGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        jvm.put_field(&mut graphics, "presentationOwner", "Ljavax/microedition/lcdui/Display;", display.clone())
+            .await?;
+        Ok((display, canvas))
+    }
+
+    async fn request_native_repaint(jvm: &Jvm, display: &mut ClassInstanceRef<Display>) -> JvmResult<()> {
+        jvm.put_field(display, "nativeRepaintPending", "Z", true).await?;
+        jvm.put_field(display, "repaintPending", "Z", true).await
+    }
+
+    async fn service_repaints(jvm: &Jvm, display: &ClassInstanceRef<Display>) -> JvmResult<()> {
+        jvm.invoke_virtual(display, "javax/microedition/lcdui/Display", "serviceRepaints", "()V", ())
+            .await
+    }
+
+    #[test]
+    fn native_repaint_presents_after_callback_and_only_for_native_requests() -> Result<()> {
+        run_jvm_test(native_presentation_protos(), |jvm| async move {
+            let (mut display, canvas) = native_presentation_fixture(&jvm).await?;
+            jvm.put_field(&mut display, "paintDisabled", "Z", true).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 0);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 0);
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 1);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 1);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentedPaint", "I").await?, 1);
+            assert!(!jvm.get_field::<bool>(&display, "paintDisabled", "Z").await?);
+            assert!(!jvm.get_field::<bool>(&display, "nativePaintActive", "Z").await?);
+            assert!(!jvm.get_field::<bool>(&display, "nativeRepaintPending", "Z").await?);
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 1);
+
+            let _: () = jvm
+                .invoke_virtual(&display, "javax/microedition/lcdui/Display", "repaint", "(IIII)V", (0, 0, 10, 10))
+                .await?;
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 2);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 1);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn native_flush_ownership_spans_java_repaints_until_java_screen_drawing() -> Result<()> {
+        run_jvm_test(native_presentation_protos(), |jvm| async move {
+            let (mut display, mut canvas) = native_presentation_fixture(&jvm).await?;
+            jvm.put_field(&mut canvas, "action", "I", 3).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(
+                jvm.get_field::<i32>(&canvas, "presentations", "I").await?,
+                0,
+                "no duplicate after explicit flush"
+            );
+            // Offscreen drawing and empty callbacks retain native ownership.
+            // Drawing on the Java screen transfers ownership for later cycles.
+            for (action, expected) in [(4, 1), (0, 2), (2, 2), (0, 2)] {
+                jvm.put_field(&mut canvas, "action", "I", action).await?;
+                let _: () = jvm
+                    .invoke_virtual(&display, "javax/microedition/lcdui/Display", "repaint", "(IIII)V", (0, 0, 10, 10))
+                    .await?;
+                service_repaints(&jvm, &display).await?;
+                assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, expected, "action {action}");
+                service_repaints(&jvm, &display).await?;
+                assert_eq!(
+                    jvm.get_field::<i32>(&canvas, "presentations", "I").await?,
+                    expected,
+                    "no unsolicited presentation"
+                );
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn native_repaint_requested_during_callback_survives_for_next_cycle() -> Result<()> {
+        run_jvm_test(native_presentation_protos(), |jvm| async move {
+            let (mut display, mut canvas) = native_presentation_fixture(&jvm).await?;
+            jvm.put_field(&mut canvas, "action", "I", 1).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 1);
+            assert!(jvm.get_field::<bool>(&display, "repaintPending", "Z").await?);
+            assert!(jvm.get_field::<bool>(&display, "nativeRepaintPending", "Z").await?);
+            assert!(!jvm.get_field::<bool>(&display, "nativePaintActive", "Z").await?);
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 2);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 2);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentedPaint", "I").await?, 2);
+            assert!(!jvm.get_field::<bool>(&display, "repaintPending", "Z").await?);
+            assert!(!jvm.get_field::<bool>(&display, "nativeRepaintPending", "Z").await?);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn native_repaint_yields_to_java_screen_drawing() -> Result<()> {
+        run_jvm_test(native_presentation_protos(), |jvm| async move {
+            let (mut display, mut canvas) = native_presentation_fixture(&jvm).await?;
+            jvm.put_field(&mut canvas, "action", "I", 2).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 1);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 0);
+            assert!(!jvm.get_field::<bool>(&display, "nativePaintActive", "Z").await?);
+            assert!(!jvm.get_field::<bool>(&display, "paintDisabled", "Z").await?);
+            let image: ClassInstanceRef<Image> = jvm.get_field(&display, "screenImage", "Ljavax/microedition/lcdui/Image;").await?;
+            let pixel = Image::image(&jvm, &image).await?.get_pixel(0, 0);
+            assert_eq!((pixel.r, pixel.g, pixel.b), (0x11, 0x22, 0x33));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn native_repaint_does_not_present_twice_after_explicit_flush() -> Result<()> {
+        run_jvm_test(native_presentation_protos(), |jvm| async move {
+            let (mut display, mut canvas) = native_presentation_fixture(&jvm).await?;
+            jvm.put_field(&mut canvas, "action", "I", 3).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "paints", "I").await?, 1);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 0);
+            assert!(jvm.get_field::<bool>(&display, "paintDisabled", "Z").await?);
+            assert!(!jvm.get_field::<bool>(&display, "nativePaintActive", "Z").await?);
+            jvm.put_field(&mut canvas, "action", "I", 0).await?;
+            request_native_repaint(&jvm, &mut display).await?;
+            service_repaints(&jvm, &display).await?;
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentations", "I").await?, 1);
+            assert_eq!(jvm.get_field::<i32>(&canvas, "presentedPaint", "I").await?, 2);
+            Ok(())
+        })
+    }
 
     impl ViewportScreen {
         fn as_proto() -> WieJavaClassProto {

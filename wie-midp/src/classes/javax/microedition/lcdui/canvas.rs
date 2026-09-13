@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
+use jvm::{ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 use jvm_class_proto::JavaMethodProto;
 use jvm_types::{ClassAccessFlags, MethodAccessFlags};
 
@@ -31,6 +31,13 @@ impl Canvas {
                     MethodAccessFlags::PROTECTED | MethodAccessFlags::ABSTRACT,
                 ),
                 JavaMethodProto::new("getGameAction", "(I)I", Self::get_game_action, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("getKeyName", "(I)Ljava/lang/String;", Self::get_key_name, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("hasPointerEvents", "()Z", Self::has_pointer_events, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("hasPointerMotionEvents", "()Z", Self::has_pointer_events, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("hasRepeatEvents", "()Z", Self::has_repeat_events, MethodAccessFlags::PUBLIC),
+                JavaMethodProto::new("pointerPressed", "(II)V", Self::pointer_event, MethodAccessFlags::PROTECTED),
+                JavaMethodProto::new("pointerDragged", "(II)V", Self::pointer_event, MethodAccessFlags::PROTECTED),
+                JavaMethodProto::new("pointerReleased", "(II)V", Self::pointer_event, MethodAccessFlags::PROTECTED),
                 JavaMethodProto::new("keyPressed", "(I)V", Self::key_pressed, MethodAccessFlags::PROTECTED),
                 JavaMethodProto::new("keyRepeated", "(I)V", Self::key_repeated, MethodAccessFlags::PROTECTED),
                 JavaMethodProto::new("keyReleased", "(I)V", Self::key_released, MethodAccessFlags::PROTECTED),
@@ -148,6 +155,52 @@ impl Canvas {
         };
 
         Ok(action)
+    }
+
+    async fn get_key_name(jvm: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<Self>, key: i32) -> JvmResult<ClassInstanceRef<JavaLangString>> {
+        // Describe the existing SK-VM keypad codes; do not translate raw events
+        // to another handset layout just to implement this MIDP query.
+        let name = match MIDPKeyCode::from_raw(key) {
+            Some(MIDPKeyCode::UP) => "위",
+            Some(MIDPKeyCode::DOWN) => "아래",
+            Some(MIDPKeyCode::LEFT) => "왼쪽",
+            Some(MIDPKeyCode::RIGHT) => "오른쪽",
+            Some(MIDPKeyCode::FIRE) => "확인",
+            Some(MIDPKeyCode::LEFT_SOFT_KEY) => "왼쪽 소프트키",
+            Some(MIDPKeyCode::RIGHT_SOFT_KEY) => "오른쪽 소프트키",
+            Some(MIDPKeyCode::CLEAR) => "지움",
+            Some(MIDPKeyCode::CALL) => "통화",
+            Some(MIDPKeyCode::HANGUP) => "종료",
+            Some(MIDPKeyCode::VOLUME_UP) => "음량 +",
+            Some(MIDPKeyCode::VOLUME_DOWN) => "음량 -",
+            Some(MIDPKeyCode::KEY_NUM0) => "0",
+            Some(MIDPKeyCode::KEY_NUM1) => "1",
+            Some(MIDPKeyCode::KEY_NUM2) => "2",
+            Some(MIDPKeyCode::KEY_NUM3) => "3",
+            Some(MIDPKeyCode::KEY_NUM4) => "4",
+            Some(MIDPKeyCode::KEY_NUM5) => "5",
+            Some(MIDPKeyCode::KEY_NUM6) => "6",
+            Some(MIDPKeyCode::KEY_NUM7) => "7",
+            Some(MIDPKeyCode::KEY_NUM8) => "8",
+            Some(MIDPKeyCode::KEY_NUM9) => "9",
+            Some(MIDPKeyCode::KEY_STAR) => "*",
+            Some(MIDPKeyCode::KEY_POUND) => "#",
+            None => return Err(jvm.exception("java/lang/IllegalArgumentException", "Invalid key code").await),
+        };
+        Ok(JavaLangString::from_rust_string(jvm, name).await?.into())
+    }
+
+    async fn has_pointer_events(_: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<Self>) -> JvmResult<bool> {
+        // Touching the host keypad generates guest keys, not guest pointer events.
+        Ok(false)
+    }
+
+    async fn has_repeat_events(_: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<Self>) -> JvmResult<bool> {
+        Ok(true)
+    }
+
+    async fn pointer_event(_: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<Self>, _: i32, _: i32) -> JvmResult<()> {
+        Ok(())
     }
 
     async fn key_pressed(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<()> {
@@ -386,6 +439,46 @@ mod test {
         async fn key_released(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, code: i32) -> JvmResult<()> {
             jvm.put_field(&mut this, "released", "I", code).await
         }
+    }
+
+    #[test]
+    fn key_names_and_capabilities_match_the_existing_keypad() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into(), [RecordingCanvas::as_proto()].into()]), |jvm| async move {
+            let canvas: ClassInstanceRef<Canvas> = jvm.new_class("javax/microedition/lcdui/TestRecordingCanvas", "()V", ()).await?.into();
+            for (key, expected) in [
+                (48, "0"),
+                (57, "9"),
+                (35, "#"),
+                (42, "*"),
+                (141, "위"),
+                (148, "확인"),
+                (6, "왼쪽 소프트키"),
+            ] {
+                let name: ClassInstanceRef<JavaLangString> = jvm
+                    .invoke_virtual(&canvas, "javax/microedition/lcdui/Canvas", "getKeyName", "(I)Ljava/lang/String;", (key,))
+                    .await?;
+                assert_eq!(JavaLangString::to_rust_string(&jvm, &name).await?, expected);
+            }
+            for key in [0, i32::MIN, 999] {
+                let result: jvm::Result<ClassInstanceRef<JavaLangString>> = jvm
+                    .invoke_virtual(&canvas, "javax/microedition/lcdui/Canvas", "getKeyName", "(I)Ljava/lang/String;", (key,))
+                    .await;
+                let Err(jvm::JavaError::JavaException(error)) = result else {
+                    panic!("Expected invalid key exception")
+                };
+                assert!(jvm.is_instance(&*error, "java/lang/IllegalArgumentException"));
+            }
+            for (method, expected) in [("hasPointerEvents", false), ("hasPointerMotionEvents", false), ("hasRepeatEvents", true)] {
+                let value: bool = jvm.invoke_virtual(&canvas, "javax/microedition/lcdui/Canvas", method, "()Z", ()).await?;
+                assert_eq!(value, expected);
+            }
+            for method in ["pointerPressed", "pointerDragged", "pointerReleased"] {
+                let _: () = jvm
+                    .invoke_virtual(&canvas, "javax/microedition/lcdui/Canvas", method, "(II)V", (10, 20))
+                    .await?;
+            }
+            Ok(())
+        })
     }
 
     #[test]

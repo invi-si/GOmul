@@ -34,3 +34,5 @@ slots*.json
 bridge.json
 config.json
 !wie-app/tauri.conf.json
+
+wie-web/native/

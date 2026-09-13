@@ -1,5 +1,29 @@
-# Compatibility observations
+# 게임 호환성 안내
 
-See the README table for the six privately tested titles. These are observations for particular supplied carrier builds, not blanket support claims. Super Action Hero's main-menu success required matching identity and accompanying data. Baseball's existing-save authentication and NOM 3's reported flicker remain unresolved.
+GOmul은 KTF·LGT·SKT의 일부 게임을 실행합니다. **같은 게임 제목이라도 통신사·화면 규격·배포 파일·동봉 데이터에 따라 결과가 달라집니다.**
 
-The optimized CPU path still falls back to the interpreter on unsupported instructions or boundaries. No promise of 30 FPS is made. Checkpoints are restricted to a Mac-hosted AVD; the native ARM64 APK itself runs on compatible physical Android devices without that feature.
+## ‘구동 성공’의 의미
+
+사용자가 현재 Android 환경에서 확인한 게임은 해당 패키지에 한해 구동 성공으로 분류합니다. 전체 장면, 엔딩, 음악, 저장 복원까지 모두 검증했다는 뜻은 아닙니다. 자동 부팅 테스트 통과도 완전한 플레이 가능 여부를 보장하지 않습니다.
+
+최신 로컬 브라우저 카탈로그는 229개 통신사별 항목(제목 묶음 214개)을 대상으로 구성했지만, 이 수치는 브라우저 완전 호환 게임 수가 아닙니다. 원본 게임과 표지는 공개 저장소에 포함하지 않습니다.
+
+## 판정 우선순위
+
+1. 해당 패키지에 대한 최신 사용자 확인과 최신 오류 보고를 우선합니다.
+2. 명시적으로 제외한 게임, 호환 불가 게임과 보류한 추가 다운로드 문제를 구동 성공으로 되돌리지 않습니다.
+3. LGT 대체를 선택한 KTF 항목과 다른 시리즈의 속편을 구분합니다.
+4. Android의 성공 판정은 WASM·iPhone 성공 판정으로 자동 이전하지 않습니다.
+
+카탈로그 제외 규칙은 `tools/web-catalog/excluded-games.json`과 카탈로그 필터를 확인하세요. 전체 맞고·올림픽 제외와 사용자 선택에 의한 제외는 에뮬레이터의 기술적 불가능 판정과 다를 수 있습니다.
+
+## 알아둘 제한
+
+- 종료된 통신 서비스나 추가 데이터가 필요한 게임은 원본 동봉 파일이 없으면 진행하지 못할 수 있습니다.
+- 슈퍼액션히어로 등은 게임에 맞는 동봉 데이터와 기기 정보가 필요할 수 있습니다. 해당 데이터를 공개 배포하지 않습니다.
+- 빠른 저장은 실험적이며 빌드에 종속됩니다. 일반 게임 저장과 별개입니다.
+- FPS는 게임 업데이트 속도와 같지 않습니다. 취소 타이머 중복 제거로 FPS가 낮아질 수 있으며 임의의 30 FPS를 호환성 목표로 삼지 않습니다.
+
+## 세부 기록
+
+[최근 오류 보고](android-reported-game-issues-20260913.md), [Android 수동 확인 목록](android-compatible-library-20260912.md), [LGT 분류](lgt-compatibility-20260912.md), [과거 판정 전체](compatibility-history.md)를 함께 확인하세요. 날짜가 오래된 통과 표시는 이후 실패 보고를 덮어쓰지 않습니다.

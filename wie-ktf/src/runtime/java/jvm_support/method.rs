@@ -113,6 +113,11 @@ impl JavaMethod {
         JavaFullName::from_ptr(&self.core, raw.ptr_name)
     }
 
+    pub fn matches_name(&self, name: &str, descriptor: &str) -> Result<bool> {
+        let raw: RawJavaMethod = read_generic(&self.core, self.ptr_raw)?;
+        JavaFullName::matches(&self.core, raw.ptr_name, name, descriptor)
+    }
+
     pub async fn run(&self, args: Box<[JavaValue]>) -> Result<JavaValue> {
         let raw: RawJavaMethod = read_generic(&self.core, self.ptr_raw)?;
         let return_type = JavaType::parse(&self.descriptor()).as_method().1.clone();
@@ -185,16 +190,27 @@ impl JavaMethod {
             }
 
             tracing::trace!("Calling native method: {:#x}", raw.fn_body_native_or_exception_table);
+            let saved_return = KtfJvmSupport::begin_native_return(&mut core)?;
             let result = run_with_unwind(&mut core, raw.fn_body_native_or_exception_table, vec![0, arg_container]).await;
+            let native_return = KtfJvmSupport::end_native_return(&mut core, saved_return)?;
 
             Allocator::free(&mut core, arg_container, (raw_args.len() as u32) * 4)?;
 
-            result?
+            let mut result = result?;
+            if let Some([low, high]) = native_return {
+                result.result = low;
+                result.result_high = high;
+            }
+            result
         } else {
             let mut params = vec![0];
             params.extend(raw_args);
 
-            tracing::trace!("Calling method: {:#x}", raw.fn_body);
+            tracing::trace!(
+                "Calling method: {:#x} {:?} args={params:?}",
+                raw.fn_body,
+                self.name().map(|name| name.to_string())
+            );
             run_with_unwind(&mut core, raw.fn_body, params).await?
         };
 
@@ -245,7 +261,14 @@ impl JavaMethod {
     }
 
     pub async fn handle_exception(core: &mut ArmCore, jvm: &Jvm, exception: Box<dyn ClassInstance>) -> Result<JavaMethodResult> {
-        tracing::warn!("Java exception thrown: {exception:?}");
+        // Read metadata only: formatting through guest Throwable methods could
+        // itself throw or run application code while we are unwinding.
+        let exception_class = exception
+            .as_any()
+            .downcast_ref::<JavaClassInstance>()
+            .map(|instance| instance.class().and_then(|class| class.name()));
+        tracing::warn!("Java exception thrown: {exception:?}, class={exception_class:?}");
+        tracing::debug!(target: "wie_frames", "KTF exception location: pc_lr={:?}", core.read_pc_lr());
 
         let current_java_exception_handler = KtfJvmSupport::current_java_exception_handler(core)?;
 
@@ -263,10 +286,18 @@ impl JavaMethod {
                 && exception_handler.current_pc < entry.to_pc
                 && Self::exception_class_matches(core, jvm, &*exception, entry.ptr_class)?
             {
+                // KTF catch blocks load the exception object from handler +16.
+                // Restoring registers alone leaves the catch variable uninitialized.
+                write_generic(
+                    core,
+                    current_java_exception_handler + offset_of!(RawJavaExceptionHandler, unk3) as u32,
+                    KtfJvmSupport::class_instance_raw(&exception),
+                )?;
                 let restore_context: u32 = read_generic(core, exception_handler.ptr_functions + 4)?;
                 let contexts_base = current_java_exception_handler + 24;
 
                 tracing::debug!(
+                    target: "wie_frames",
                     "Java exception handler found: {:#x}, method: {:#x}",
                     entry.target,
                     exception_handler.ptr_method
@@ -304,7 +335,7 @@ impl JavaMethod {
             parameter_types.insert(0, JavaType::Class("".into())); // TODO name
         }
 
-        let is_native = proto.access_flags.contains(MethodAccessFlags::NATIVE);
+        let has_body = !proto.access_flags.contains(MethodAccessFlags::ABSTRACT);
         let proxy = JavaMethodProxy {
             ptr_method,
             jvm: jvm.clone(),
@@ -319,7 +350,12 @@ impl JavaMethod {
 
         // Entry-field addresses identify the ABI while sharing the method implementation.
         let fn_body = core.make_svc_stub(SVC_CATEGORY_JAVA, ptr_method)?;
-        let fn_native = if is_native {
+        // KTF AOT callers retain the SDK's native calling convention even when
+        // our host implementation is declared as an ordinary Java method (for
+        // example Class.forName). Both entries marshal into the same body.
+        // This applies only to host prototypes, never guest AOT definitions;
+        // their exception tables remain untouched. Abstract methods have no body.
+        let fn_native = if has_body {
             let ptr_native_entry = ptr_method + offset_of!(RawJavaMethod, fn_body_native_or_exception_table) as u32;
             java_functions.lock().insert(ptr_native_entry, proxy);
             core.make_svc_stub(SVC_CATEGORY_JAVA, ptr_native_entry)?
@@ -416,8 +452,13 @@ where
         let mut context = self.context.clone();
         let (_, lr) = core.read_pc_lr()?;
 
+        tracing::trace!(target: "ktf_java_calls", "enter method={} descriptor={} caller={lr:#x} args={raw_args:x?}", self.proto.name, self.proto.descriptor);
         let result = self.proto.body.call(&self.jvm, &mut context, args.into_boxed_slice()).await;
+        if let Ok(value) = &result {
+            tracing::trace!(target: "ktf_java_calls", "return method={} caller={lr:#x} value={value:?}", self.proto.name);
+        }
         if let Err(JavaError::JavaException(x)) = result {
+            tracing::debug!(target: "wie_frames", "KTF API exception: method={:?}, descriptor={:?}, caller={lr:#x}", self.proto.name, self.proto.descriptor);
             // if we executed this from rust code, we should propagate this down
             if lr == RUN_FUNCTION_LR {
                 let java_exception = KtfJvmSupport::class_instance_raw(&x);

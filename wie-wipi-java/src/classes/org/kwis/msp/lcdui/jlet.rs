@@ -22,6 +22,12 @@ impl Jlet {
             methods: vec![
                 JavaMethodProto::new("<init>", "()V", Self::init, MethodAccessFlags::PROTECTED),
                 JavaMethodProto::new(
+                    "getCurrentJlet",
+                    "()Lorg/kwis/msp/lcdui/Jlet;",
+                    Self::get_active_jlet,
+                    MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
                     "getActiveJlet",
                     "()Lorg/kwis/msp/lcdui/Jlet;",
                     Self::get_active_jlet,
@@ -168,5 +174,32 @@ impl Jlet {
 
     pub async fn display(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Display>> {
         jvm.get_field(this, "dis", "Lorg/kwis/msp/lcdui/Display;").await
+    }
+}
+
+#[cfg(test)]
+mod current_jlet_tests {
+    #[test]
+    fn current_and_active_names_read_the_same_guest_field() -> wie_util::Result<()> {
+        let mut protos = alloc::vec::Vec::from(crate::get_protos());
+        let mut subclass = super::Jlet::as_proto();
+        subclass.name = "test/ConcreteJlet";
+        subclass.parent_class = Some("org/kwis/msp/lcdui/Jlet");
+        subclass.access_flags = jvm_types::ClassAccessFlags::PUBLIC;
+        subclass.methods.clear();
+        subclass.fields.clear();
+        protos.push(subclass);
+        test_utils::run_jvm_test(alloc::boxed::Box::new([protos.into()]), |jvm| async move {
+            let object = jvm.instantiate_class("test/ConcreteJlet").await?;
+            jvm.put_static_field("org/kwis/msp/lcdui/Jlet", "currentJlet", "Lorg/kwis/msp/lcdui/Jlet;", object.clone())
+                .await?;
+            for name in ["getCurrentJlet", "getActiveJlet"] {
+                let result: jvm::ClassInstanceRef<super::Jlet> = jvm
+                    .invoke_static("org/kwis/msp/lcdui/Jlet", name, "()Lorg/kwis/msp/lcdui/Jlet;", ())
+                    .await?;
+                assert_eq!(&*result, &object);
+            }
+            Ok(())
+        })
     }
 }

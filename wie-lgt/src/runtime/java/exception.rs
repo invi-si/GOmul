@@ -1,4 +1,4 @@
-use core::mem::size_of;
+use core::{future::Future, mem::size_of, task::Poll};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -18,6 +18,68 @@ struct JavaSupportContext {
 
 pub fn init(core: &mut ArmCore) -> Result<()> {
     write_generic(core, SUPPORT_CONTEXT_BASE, JavaSupportContext::zeroed())
+}
+
+// Each suspended invocation retains its state in guest memory. Install it only
+// while polling that invocation: another task may run before its next poll.
+struct InvocationContext {
+    core: ArmCore,
+    slot: u32,
+}
+
+impl InvocationContext {
+    fn new(core: &mut ArmCore) -> Result<Self> {
+        let slot = Allocator::alloc(core, size_of::<JavaSupportContext>() as u32)?;
+        write_generic(core, slot, JavaSupportContext::zeroed())?;
+        Ok(Self { core: core.clone(), slot })
+    }
+
+    fn with_active<T>(&mut self, action: impl FnOnce() -> T) -> Result<T> {
+        let parent: JavaSupportContext = read_generic(&self.core, SUPPORT_CONTEXT_BASE)?;
+        let active: JavaSupportContext = read_generic(&self.core, self.slot)?;
+        write_generic(&mut self.core, SUPPORT_CONTEXT_BASE, active)?;
+        let result = action();
+        let active: JavaSupportContext = read_generic(&self.core, SUPPORT_CONTEXT_BASE)?;
+        // Restore the enclosing invocation even if saving this slot fails.
+        let saved = write_generic(&mut self.core, self.slot, active);
+        write_generic(&mut self.core, SUPPORT_CONTEXT_BASE, parent)?;
+        saved?;
+        Ok(result)
+    }
+}
+
+impl Drop for InvocationContext {
+    fn drop(&mut self) {
+        // A canceled/failed invocation may still own registered catch frames.
+        let cleanup = (|| -> Result<()> {
+            let context: JavaSupportContext = read_generic(&self.core, self.slot)?;
+            let mut frame = context.ptr_current_exception_frame;
+            while frame != 0 {
+                let next: u32 = read_generic(&self.core, frame)?;
+                Allocator::free(&mut self.core, frame, FRAME_WORDS * size_of::<u32>() as u32)?;
+                frame = next;
+            }
+            Allocator::free(&mut self.core, self.slot, size_of::<JavaSupportContext>() as u32)
+        })();
+        if let Err(error) = cleanup {
+            tracing::error!("Failed to release LGT invocation exception context: {error}");
+        }
+    }
+}
+
+/// A host-to-guest Java invocation owns its exception chain. Nested invocations
+/// must report errors to their host caller, and concurrent ones must not share it.
+pub async fn invocation<T>(core: &mut ArmCore, target: u32, args: &[u32]) -> Result<T>
+where
+    T: wie_core_arm::RunFunctionResult<T>,
+{
+    let mut context = InvocationContext::new(core)?;
+    let mut run = core::pin::pin!(core.run_function(target, args));
+    core::future::poll_fn(|cx| match context.with_active(|| run.as_mut().poll(cx)) {
+        Ok(result) => result,
+        Err(error) => Poll::Ready(Err(error)),
+    })
+    .await
 }
 
 pub fn push(core: &mut ArmCore) -> Result<()> {
@@ -110,7 +172,58 @@ mod tests {
     use wie_core_arm::{Allocator, ArmCore};
     use wie_util::Result;
 
-    use super::{init, pending, pop, push, unwind};
+    use super::{InvocationContext, init, pending, pop, push, unwind};
+
+    #[test]
+    fn suspended_invocations_keep_independent_exception_chains() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        Allocator::init(&mut core)?;
+        init(&mut core)?;
+        let mut a = InvocationContext::new(&mut core)?;
+        let mut b = InvocationContext::new(&mut core)?;
+        let mut registers = core.save_context();
+        registers.lr = 0x4001;
+        core.restore_context(&registers);
+        a.with_active(|| push(&mut core))??;
+        registers.lr = 0x5001;
+        core.restore_context(&registers);
+        b.with_active(|| push(&mut core))??;
+        // B suspended after A; A resumes first, as after a guest Thread.sleep.
+        assert_eq!(a.with_active(|| unwind(&mut core, 0x1234))??, Some(0x4001));
+        assert_eq!(pending(&core)?, 0);
+        assert_eq!(b.with_active(|| pending(&core))??, 0);
+        b.with_active(|| pop(&mut core))??;
+        assert_eq!(a.with_active(|| pending(&core))??, 0x1234);
+        assert_eq!(b.with_active(|| unwind(&mut core, 0x5678))??, None);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_invocation_and_cancellation_preserve_parent_frames() -> Result<()> {
+        let mut core = ArmCore::new(false, None)?;
+        Allocator::init(&mut core)?;
+        init(&mut core)?;
+        let free_before = Allocator::free_memory(&core)?;
+        let mut parent = InvocationContext::new(&mut core)?;
+        let mut child = InvocationContext::new(&mut core)?;
+        parent.with_active(|| -> Result<()> {
+            push(&mut core)?;
+            child.with_active(|| -> Result<()> {
+                // A child error cannot jump directly into the parent's catch.
+                assert_eq!(unwind(&mut core, 0x1234)?, None);
+                push(&mut core)
+            })??;
+            // Cancel a suspended child that still has a catch frame.
+            drop(child);
+            pop(&mut core)?;
+            assert_eq!(unwind(&mut core, 0x5678)?, None);
+            Ok(())
+        })??;
+        assert_eq!(pending(&core)?, 0);
+        drop(parent);
+        assert_eq!(Allocator::free_memory(&core)?, free_before);
+        Ok(())
+    }
 
     #[test]
     fn exception_frame_restores_guest_context() -> Result<()> {

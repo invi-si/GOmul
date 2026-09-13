@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{boxed::Box, vec};
 use core::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
@@ -54,6 +54,15 @@ const _: () = {
     assert!(size_of::<LgtGraphicsContext>() == LGT_GRAPHICS_CONTEXT_SIZE);
 };
 
+// The prefix remains the native framebuffer ABI. Alpha is guest-backed
+// image metadata, separate from the display-format pixels exposed to AOT code.
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct ImageBacking {
+    framebuffer: WIPICFramebuffer,
+    alpha: WIPICIndirectPtr,
+}
+
 struct ResolvedFramebuffer {
     framebuffer: FrameBuffer,
     public: LgtFramebuffer,
@@ -66,6 +75,8 @@ struct ResolvedContext {
     translation_y: i32,
     foreground: u32,
     opaque_copy: bool,
+    pixel_op: u32,
+    pixel_param: u32,
 }
 
 pub fn init_process_state(core: &mut ArmCore, physical_width: u32, physical_height: u32) -> Result<()> {
@@ -332,6 +343,8 @@ fn normalize_context(raw: LgtGraphicsContext, framebuffer: LgtFramebuffer, view:
         translation_x: raw.offset_x,
         translation_y: raw.offset_y.wrapping_add(adjust_y),
         foreground: raw.foreground,
+        pixel_op: if raw.xor_enabled == 0 { raw.pixel_op } else { 0 },
+        pixel_param: raw.pixel_param,
         opaque_copy: raw.alpha == 255 && raw.pixel_op == 0 && raw.xor_enabled == 0,
     }
 }
@@ -342,6 +355,26 @@ fn image_framebuffer(context: &dyn WIPICContext, ptr_image: WIPICIndirectPtr) ->
         return Err(WieError::FatalError("LGT image has no native backing".into()));
     }
     Ok(FrameBuffer(read_record(context, WIPICIndirectPtr(image.ptr_image))?))
+}
+
+fn image_with_alpha(context: &mut dyn WIPICContext, handle: WIPICIndirectPtr) -> Result<Box<dyn Image>> {
+    let image: LgtImage = read_record(context, handle)?;
+    let backing: ImageBacking = read_record(context, WIPICIndirectPtr(image.ptr_image))?;
+    let pixels = FrameBuffer(backing.framebuffer).image(context)?;
+    if backing.alpha.0 == 0 {
+        return Ok(pixels);
+    }
+    let mut colors = pixels.colors();
+    let mut alpha = vec![0; colors.len()];
+    context.read_bytes(context.data_ptr(backing.alpha)?, &mut alpha)?;
+    for (color, alpha) in colors.iter_mut().zip(alpha) {
+        color.a = alpha;
+    }
+    Ok(Box::new(VecImageBuffer::<ArgbPixel>::from_raw(
+        pixels.width(),
+        pixels.height(),
+        colors.into_iter().map(ArgbPixel::from_color).collect(),
+    )))
 }
 
 fn activate_application_view(context: &mut dyn WIPICContext, handle: WIPICIndirectPtr) -> Result<()> {
@@ -618,6 +651,24 @@ pub async fn fill_rect(
     primitives::fill_rect(context, &resolved.framebuffer, x, y, width as u32, height as u32, color, graphics.clip)
 }
 
+// LGT 0xf0: framebuffer, x array, y array, point count, graphics context.
+pub async fn fill_polygon(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, xs: u32, ys: u32, count: i32, ptr_graphics: u32) -> Result<()> {
+    if count < 3 {
+        return Ok(());
+    }
+    let resolved = resolve_framebuffer(context, dst)?;
+    let graphics = resolve_context(context, &resolved, ptr_graphics)?;
+    let mut points = alloc::vec::Vec::new();
+    for index in 0..count as u32 {
+        let offset = index.checked_mul(4).ok_or(WieError::InvalidMemoryAccess(xs))?;
+        let x: i32 = read_generic(context, xs.checked_add(offset).ok_or(WieError::InvalidMemoryAccess(xs))?)?;
+        let y: i32 = read_generic(context, ys.checked_add(offset).ok_or(WieError::InvalidMemoryAccess(ys))?)?;
+        points.push((x.wrapping_add(graphics.translation_x), y.wrapping_add(graphics.translation_y)));
+    }
+    let color = resolved.framebuffer.pixel_to_color(graphics.foreground);
+    primitives::fill_polygon(context, &resolved.framebuffer, &points, color, graphics.clip)
+}
+
 pub async fn draw_line(
     context: &mut dyn WIPICContext,
     dst: WIPICIndirectPtr,
@@ -749,21 +800,24 @@ pub async fn draw_image(
     if width <= 0 || height <= 0 {
         return Ok(());
     }
-    let source = image_framebuffer(context, ptr_image)?.image(context)?;
+    let source = image_with_alpha(context, ptr_image)?;
     let resolved = resolve_framebuffer(context, dst)?;
     let graphics = resolve_context(context, &resolved, ptr_graphics)?;
-    primitives::draw_image(
+    primitives::draw_image_with_pixel_op(
         context,
         &resolved.framebuffer,
         x.wrapping_add(graphics.translation_x),
         y.wrapping_add(graphics.translation_y),
         width as u32,
         height as u32,
-        &*source,
+        source,
         source_x,
         source_y,
         graphics.clip,
+        graphics.pixel_op,
+        graphics.pixel_param,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -785,18 +839,21 @@ pub async fn copy_frame_buffer(
     let source = resolve_framebuffer(context, source)?.framebuffer.image(context)?;
     let resolved = resolve_framebuffer(context, dst)?;
     let graphics = resolve_context(context, &resolved, ptr_graphics)?;
-    primitives::draw_image(
+    primitives::draw_image_with_pixel_op(
         context,
         &resolved.framebuffer,
         x.wrapping_add(graphics.translation_x),
         y.wrapping_add(graphics.translation_y),
         width as u32,
         height as u32,
-        &*source,
+        source,
         source_x,
         source_y,
         graphics.clip,
+        graphics.pixel_op,
+        graphics.pixel_param,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -817,18 +874,21 @@ pub async fn copy_area(
     let resolved = resolve_framebuffer(context, dst)?;
     let source = resolved.framebuffer.image(context)?;
     let graphics = resolve_context(context, &resolved, ptr_graphics)?;
-    primitives::draw_image(
+    primitives::draw_image_with_pixel_op(
         context,
         &resolved.framebuffer,
         x.wrapping_add(graphics.translation_x),
         y.wrapping_add(graphics.translation_y),
         width as u32,
         height as u32,
-        &*source,
+        source,
         source_x.wrapping_add(graphics.translation_x),
         source_y.wrapping_add(graphics.translation_y),
         graphics.clip,
+        graphics.pixel_op,
+        graphics.pixel_param,
     )
+    .await
 }
 
 pub async fn draw_string(
@@ -956,16 +1016,15 @@ pub async fn get_display_info(context: &mut dyn WIPICContext, kind: WIPICWord, o
     Ok(1)
 }
 
-fn opaque_native_image(image: &dyn Image) -> Option<VecImageBuffer<Rgb565Pixel>> {
+fn native_image(image: &dyn Image) -> (VecImageBuffer<Rgb565Pixel>, alloc::vec::Vec<u8>) {
     let colors = image.colors();
-    if colors.iter().any(|color| color.a != 255) {
-        return None;
-    }
-    Some(VecImageBuffer::from_raw(
-        image.width(),
-        image.height(),
-        colors.into_iter().map(Rgb565Pixel::from_color).collect(),
-    ))
+    let alpha = if colors.iter().any(|color| color.a != 255) {
+        colors.iter().map(|color| color.a).collect()
+    } else {
+        vec![]
+    };
+    let pixels = VecImageBuffer::from_raw(image.width(), image.height(), colors.into_iter().map(Rgb565Pixel::from_color).collect());
+    (pixels, alpha)
 }
 
 pub async fn create_image(
@@ -975,20 +1034,27 @@ pub async fn create_image(
     offset: WIPICWord,
     length: WIPICWord,
 ) -> Result<WIPICWord> {
-    let mut backing = decode_image_framebuffer(context, encoded_data, offset, length)?;
-    // Native LGT code reads opaque image pointers in the display's RGB565
-    // format. Keep alpha-bearing images in ARGB for the existing blend path.
-    if backing.0.bpp != FRAMEBUFFER_DEPTH {
-        let image = backing.image(context)?;
-        if let Some(native) = opaque_native_image(&*image) {
-            let converted = FrameBuffer::from_image(context, &native)?;
-            context.free(backing.0.buf)?;
-            backing = converted;
-        }
-    }
+    let decoded = decode_image_framebuffer(context, encoded_data, offset, length)?;
+    let image = decoded.image(context)?;
+    let (native, alpha_bytes) = native_image(&*image);
+    let alpha = if alpha_bytes.is_empty() {
+        WIPICIndirectPtr(0)
+    } else {
+        let mask = context.alloc(alpha_bytes.len() as u32)?;
+        context.write_bytes(context.data_ptr(mask)?, &alpha_bytes)?;
+        mask
+    };
+    let backing = FrameBuffer::from_image(context, &native)?;
+    context.free(decoded.0.buf)?;
     let width = backing.0.width;
     let height = backing.0.height;
-    let ptr_backing = alloc_record(context, backing.0)?;
+    let ptr_backing = alloc_record(
+        context,
+        ImageBacking {
+            framebuffer: backing.0,
+            alpha,
+        },
+    )?;
     let ptr_view = create_view(context, ptr_backing, 0, 0, width, height)?;
     let ptr_framebuffer = alloc_record(
         context,
@@ -1040,17 +1106,25 @@ mod tests {
     #[test]
     fn opaque_images_use_native_rgb565_with_tightly_packed_rows() {
         let image = VecImageBuffer::<ArgbPixel>::from_raw(3, 2, vec![0xff002040, 0xff209020, 0xff000000, 0xffff0000, 0xff00ff00, 0xff0000ff]);
-        let native = super::opaque_native_image(&image).unwrap();
+        let (native, alpha) = super::native_image(&image);
+        assert!(alpha.is_empty());
         assert_eq!(native.bytes_per_pixel(), 2);
         assert_eq!((native.width(), native.height()), (3, 2));
         assert_eq!(&*native.raw(), &[0x08, 0x01, 0x84, 0x24, 0, 0, 0, 0xf8, 0xe0, 0x07, 0x1f, 0]);
     }
 
     #[test]
-    fn transparent_and_partial_alpha_images_keep_argb() {
+    fn transparent_images_expose_rgb565_and_retain_separate_alpha() {
         for alpha in [0, 127, 254] {
             let image = VecImageBuffer::<ArgbPixel>::from_raw(2, 1, vec![0xff123456, (alpha << 24) | 0x123456]);
-            assert!(super::opaque_native_image(&image).is_none());
+            let (native, mask) = super::native_image(&image);
+            assert_eq!(native.bytes_per_pixel(), 2);
+            assert_eq!(mask, vec![255, alpha as u8]);
+            assert_eq!(native.raw().len(), 4);
+            assert_eq!(
+                ArgbPixel::from_color(native.get_pixel(0, 0)),
+                ArgbPixel::from_color(native.get_pixel(1, 0))
+            );
         }
     }
 

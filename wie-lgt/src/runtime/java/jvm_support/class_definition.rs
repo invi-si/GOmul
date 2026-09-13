@@ -416,6 +416,26 @@ impl JavaClassDefinition {
         Ok(self.descriptor()?.instance_field_word_count as usize)
     }
 
+    /// AOT field offsets belong to the phone ABI. Host implementation fields
+    /// without an ABI mapping live in a tail after the compiled instance area.
+    pub fn instance_storage_word_count(&self) -> Result<usize> {
+        let descriptor = self.descriptor()?;
+        let native_words = descriptor.instance_field_word_count as usize;
+        if descriptor.ptr_vtable == 0 {
+            return Ok(native_words);
+        }
+        let mut parent = descriptor.ptr_super_class;
+        while parent != 0 {
+            let class = Self::from_raw(parent, &self.core);
+            let descriptor = class.descriptor()?;
+            if descriptor.ptr_vtable == 0 {
+                return Ok(native_words + descriptor.instance_field_word_count as usize);
+            }
+            parent = descriptor.ptr_super_class;
+        }
+        Ok(native_words)
+    }
+
     pub async fn prepare_generated(&mut self, core: &mut ArmCore, jvm: &Jvm, generated_classes: u32) -> Result<()> {
         self.patch_declared_instance_field_word_indices()?;
 

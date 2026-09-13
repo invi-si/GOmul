@@ -6,7 +6,9 @@
   "scripts": {
     "build:dev": "webpack --config wie-web/webpack.config.dev.ts",
     "build:prod": "webpack --config wie-web/webpack.config.prod.ts",
-    "start": "webpack serve --config wie-web/webpack.config.dev.ts"
+    "start": "webpack serve --config wie-web/webpack.config.dev.ts",
+    "start:catalog": "python3 tools/web-catalog/server.py",
+    "build:catalog:native": "./tools/web-catalog/build-native.sh"
   },
   "author": "",
   "dependencies": {
@@ -27,6 +29,7 @@
     "@types/node": "^26.4.0",
     "@types/picomatch": "^4.0.3",
     "@types/webpack": "^5.28.5",
-    "copy-webpack-plugin": "^14.0.0"
+    "copy-webpack-plugin": "^14.0.0",
+    "webpack-merge": "^6.0.1"
   }
 }

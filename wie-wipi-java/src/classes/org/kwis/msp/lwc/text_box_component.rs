@@ -39,6 +39,7 @@ impl TextBoxComponent {
 
         let _: () = jvm.invoke_special(&this, "org/kwis/msp/lwc/TextComponent", "<init>", "()V", ()).await?;
 
+        jvm.put_field(&mut this, "wieMultiline", "Z", true).await?;
         jvm.put_field(&mut this, "constraint", "I", constraint).await?;
         jvm.invoke_virtual(&this, "org/kwis/msp/lwc/TextComponent", "setString", "(Ljava/lang/String;)V", (data,))
             .await

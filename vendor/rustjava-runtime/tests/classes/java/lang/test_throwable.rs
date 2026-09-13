@@ -1,0 +1,140 @@
+use alloc::boxed::Box;
+
+use jvm::{ClassInstance, ClassInstanceRef, JavaError, Result, runtime::JavaLangString};
+use rustjava_runtime::classes::java::lang::String;
+
+use test_utils::test_jvm;
+
+#[tokio::test]
+async fn test_to_string() -> Result<()> {
+    let jvm = test_jvm().await?;
+
+    let message = JavaLangString::from_rust_string(&jvm, "test message").await?;
+
+    let throwable = jvm.new_class("java/lang/Throwable", "(Ljava/lang/String;)V", (message,)).await?;
+    let to_string = jvm
+        .invoke_virtual(&throwable, &throwable.class_definition().name(), "toString", "()Ljava/lang/String;", ())
+        .await?;
+
+    let result = JavaLangString::to_rust_string(&jvm, &to_string).await?;
+
+    assert_eq!(result, "java.lang.Throwable: test message");
+
+    let message: ClassInstanceRef<String> = jvm
+        .invoke_virtual(&throwable, &throwable.class_definition().name(), "getMessage", "()Ljava/lang/String;", ())
+        .await?;
+    assert_eq!(JavaLangString::to_rust_string(&jvm, &message).await?, "test message");
+    let localized: ClassInstanceRef<String> = jvm
+        .invoke_virtual(
+            &throwable,
+            &throwable.class_definition().name(),
+            "getLocalizedMessage",
+            "()Ljava/lang/String;",
+            (),
+        )
+        .await?;
+    assert_eq!(localized.identity(), message.identity());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_stacktrace() -> Result<()> {
+    let jvm = test_jvm().await?;
+
+    // get exception by creating invalid url
+    let url_string = JavaLangString::from_rust_string(&jvm, "invalid://invalid").await?;
+    let url: Result<Box<dyn ClassInstance>> = jvm.new_class("java/net/URL", "(Ljava/lang/String;)V", (url_string,)).await;
+
+    let JavaError::JavaException(exception) = url.err().unwrap();
+
+    let string_writer = jvm.new_class("java/io/StringWriter", "()V", ()).await?;
+    let print_writer = jvm
+        .new_class("java/io/PrintWriter", "(Ljava/io/Writer;)V", (string_writer.clone(),))
+        .await?;
+
+    let _: () = jvm
+        .invoke_virtual(
+            &exception,
+            &exception.class_definition().name(),
+            "printStackTrace",
+            "(Ljava/io/PrintWriter;)V",
+            (print_writer,),
+        )
+        .await?;
+
+    let result: ClassInstanceRef<String> = jvm
+        .invoke_virtual(
+            &string_writer,
+            &string_writer.class_definition().name(),
+            "toString",
+            "()Ljava/lang/String;",
+            (),
+        )
+        .await?;
+    let result = JavaLangString::to_rust_string(&jvm, &result).await?;
+
+    assert_eq!(
+        result,
+        "\
+                java.net.MalformedURLException: unknown protocol: invalid\n\
+                    \tat java/net/URL.<init>(Ljava/net/URL;Ljava/lang/String;Ljava/net/URLStreamHandler;)V\n\
+                    \tat java/net/URL.<init>(Ljava/net/URL;Ljava/lang/String;)V\n\
+                    \tat java/net/URL.<init>(Ljava/lang/String;)V\n\
+            "
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_print_stack_trace_with_cause() -> Result<()> {
+    let jvm = test_jvm().await?;
+
+    let cause_message = JavaLangString::from_rust_string(&jvm, "root").await?;
+    let cause = jvm
+        .new_class("java/lang/RuntimeException", "(Ljava/lang/String;)V", (cause_message,))
+        .await?;
+
+    let message = JavaLangString::from_rust_string(&jvm, "wrapper").await?;
+    let throwable = jvm
+        .new_class(
+            "java/lang/RuntimeException",
+            "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+            (message, cause),
+        )
+        .await?;
+
+    let string_writer = jvm.new_class("java/io/StringWriter", "()V", ()).await?;
+    let print_writer = jvm
+        .new_class("java/io/PrintWriter", "(Ljava/io/Writer;)V", (string_writer.clone(),))
+        .await?;
+
+    let _: () = jvm
+        .invoke_virtual(
+            &throwable,
+            &throwable.class_definition().name(),
+            "printStackTrace",
+            "(Ljava/io/PrintWriter;)V",
+            (print_writer,),
+        )
+        .await?;
+
+    let result: ClassInstanceRef<String> = jvm
+        .invoke_virtual(
+            &string_writer,
+            &string_writer.class_definition().name(),
+            "toString",
+            "()Ljava/lang/String;",
+            (),
+        )
+        .await?;
+    let result = JavaLangString::to_rust_string(&jvm, &result).await?;
+
+    assert_eq!(
+        result,
+        "java.lang.RuntimeException: wrapper\nCaused by: java.lang.RuntimeException: root\n"
+    );
+
+    Ok(())
+}

@@ -20,6 +20,12 @@ pub struct J2MEEmulator {
     system: System,
 }
 
+impl Drop for J2MEEmulator {
+    fn drop(&mut self) {
+        self.system.shutdown();
+    }
+}
+
 impl J2MEEmulator {
     pub fn jar_metadata(jar: &[u8]) -> Result<Option<(String, Option<Vec<u8>>)>> {
         let files = extract_zip(jar)?;

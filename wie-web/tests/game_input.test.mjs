@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bindGameInput, HeldGameKeys, keyboardGameKey } from "../src/ts/game_input.ts";
+import { bindGameInput, HeldGameKeys, keyboardGameKey, directionalGameKey } from "../src/ts/game_input.ts";
 
 const recordingSink = () => {
   const events = [];
@@ -169,13 +169,14 @@ for (const interruption of ["blur", "hidden", "pagehide", "editing", "dispose"])
   });
 }
 
-test("keyboard supports real digits, numpad, legacy keypad, and native phone key mappings", () => {
+test("keyboard preserves numpad and other phone keys alongside the requested layout", () => {
   for (let digit = 0; digit <= 9; digit++) {
-    assert.equal(keyboardGameKey({ code: `Digit${digit}`, key: `${digit}` }), `${digit}`);
+    assert.equal(keyboardGameKey({ code: `Digit${digit}`, key: `${digit}` }), digit === 0 ? "1" : `${digit}`);
     assert.equal(keyboardGameKey({ code: `Numpad${digit}`, key: `${digit}` }), `${digit}`);
   }
   const expected = {
-    KeyQ: "4", KeyW: "5", KeyE: "6", KeyA: "7", KeyS: "8", KeyD: "9",
+    KeyQ: "4", KeyW: "UP", KeyE: "6", KeyA: "LEFT", KeyS: "DOWN", KeyD: "RIGHT",
+    ArrowUp: "UP", ArrowLeft: "LEFT", ArrowDown: "DOWN", ArrowRight: "RIGHT",
     KeyZ: "*", KeyX: "0", KeyC: "#", Space: "OK", Enter: "OK", NumpadEnter: "OK",
     F1: "CALL", F2: "HANGUP", ShiftLeft: "LSOFT", ShiftRight: "RSOFT", Backspace: "CLR",
   };
@@ -241,4 +242,43 @@ test("assistive activation cannot release an independently held key and disposal
   input.dispose();
   assert.equal(timers.size, 0);
   assert.deepEqual(sink.events, [["down", "UP"], ["up", "UP"]]);
+});
+
+
+test("The shared keyboard maps the requested physical key grid without changing other keys", () => {
+  const rows = [
+    [["KeyW", "KeyA", "KeyS", "KeyD"], ["UP", "LEFT", "DOWN", "RIGHT"]],
+    [["Digit0", "Minus", "Equal"], ["1", "2", "3"]],
+    [["KeyO", "KeyP", "BracketLeft"], ["4", "5", "6"]],
+    [["KeyL", "Semicolon", "Quote"], ["7", "8", "9"]],
+    [["Comma", "Period", "Slash"], ["*", "0", "#"]],
+  ];
+  for (const [codes, expected] of rows) {
+    assert.deepEqual(codes.map(code => keyboardGameKey({code, key:""})), expected);
+  }
+  assert.equal(keyboardGameKey({code:"KeyO", key:"ㅐ"}), "4");
+  assert.equal(keyboardGameKey({code:"Digit3", key:"#"}), "#");
+  assert.equal(keyboardGameKey({code:"KeyW", key:"w"}), "UP");
+});
+
+test("Movement and keypad holds route independently and release on blur", () => {
+  const f = fixture();
+  fire(f.document, "keydown", {code:"KeyW", key:"w"});
+  fire(f.document, "keydown", {code:"Semicolon", key:";"});
+  fire(f.document, "keydown", {code:"KeyW", key:"w", repeat:true});
+  fire(f.document, "keyup", {code:"KeyW", key:"w"});
+  fire(f.window, "blur");
+  assert.deepEqual(f.sink.events, [["down","UP"],["down","8"],["up","UP"],["up","8"]]);
+  f.input.dispose();
+});
+
+
+test("numeric direction profiles preserve aliases until both inputs release",()=>{
+ const sink=recordingSink(),held=new HeldGameKeys(sink);
+ held.press("UP",directionalGameKey("UP",true));held.press("2",directionalGameKey("2",true));
+ held.release("UP");assert.deepEqual(sink.events,[["down","2"]]);held.release("2");
+ assert.deepEqual(sink.events,[["down","2"],["up","2"]]);
+ for(const [key,value] of Object.entries({UP:"2",LEFT:"4",RIGHT:"6",DOWN:"8",OK:"OK",LSOFT:"LSOFT"})){
+  assert.equal(directionalGameKey(key,true),value);assert.equal(directionalGameKey(key,false),key);
+ }
 });

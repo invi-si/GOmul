@@ -27,6 +27,46 @@ impl KtfWIPICContext {
 
 #[async_trait::async_trait]
 impl WIPICContext for KtfWIPICContext {
+    async fn input_state(&mut self) -> Result<u32> {
+        let address: i32 = match self.jvm.get_static_field("javax/microedition/lcdui/Display", "nativeInput", "I").await {
+            Ok(p) => p,
+            Err(e) => return Err(wie_jvm_support::JvmSupport::to_wie_err(&self.jvm, e).await),
+        };
+        if address != 0 {
+            return Ok(address as u32);
+        }
+        let address = Allocator::alloc(&mut self.core, wie_wipi_c::api::input::STATE_SIZE)?;
+        self.core
+            .write_bytes(address, &alloc::vec![0; wie_wipi_c::api::input::STATE_SIZE as usize])?;
+        if let Err(e) = self
+            .jvm
+            .put_static_field("javax/microedition/lcdui/Display", "nativeInput", "I", address as i32)
+            .await
+        {
+            return Err(wie_jvm_support::JvmSupport::to_wie_err(&self.jvm, e).await);
+        }
+        Ok(address)
+    }
+    async fn input_selection(&mut self) -> Result<Option<(bool, i32)>> {
+        let result = async {
+            let epoch: i32 = self
+                .jvm
+                .get_static_field("javax/microedition/lcdui/Display", "inputModeEpoch", "I")
+                .await?;
+            let korean: bool = self.jvm.get_static_field("javax/microedition/lcdui/Display", "koreanInput", "Z").await?;
+            Ok::<_, jvm::JavaError>(if epoch == 0 { None } else { Some((korean, epoch)) })
+        }
+        .await;
+        match result {
+            Ok(p) => Ok(p),
+            Err(e) => Err(wie_jvm_support::JvmSupport::to_wie_err(&self.jvm, e).await),
+        }
+    }
+
+    fn indirect_image_framebuffers(&self) -> bool {
+        true
+    }
+
     #[cfg(feature = "cpu-transcript-capture")]
     fn transcript_begin(&mut self, callback: u64) {
         self.core.transcript_begin(callback);
@@ -34,6 +74,13 @@ impl WIPICContext for KtfWIPICContext {
     #[cfg(feature = "cpu-transcript-capture")]
     fn transcript_end(&mut self, callback: u64, ok: bool) {
         self.core.transcript_end(callback, ok);
+    }
+
+    fn total_memory(&self) -> u32 {
+        Allocator::total_memory()
+    }
+    fn free_memory(&self) -> Result<u32> {
+        Allocator::free_memory(&self.core)
     }
 
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {

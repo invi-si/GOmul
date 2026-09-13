@@ -77,7 +77,10 @@ impl SmafPlayer {
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
 
         let data = JavaIoInputStream::read_until_end(jvm, &stream).await?;
-        let audio_handle = context.system().audio().load_smaf(&data).unwrap();
+        let audio_handle = match context.system().audio().load_smaf(&data) {
+            Ok(handle) => handle,
+            Err(_) => return Err(jvm.exception("javax/microedition/media/MediaException", "Invalid SMAF data").await),
+        };
 
         jvm.put_field(&mut this, "audioHandle", "I", audio_handle as i32).await?;
 
@@ -238,9 +241,63 @@ mod test {
     };
 
     #[test]
-    fn test_unsupported_player_controls() -> Result<()> {
+    fn invalid_stream_is_a_guest_media_exception() -> Result<()> {
         run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
             let data = jvm.instantiate_array("B", 0).await?;
+            let stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (data,)).await?;
+            let content_type = JavaLangString::from_rust_string(&jvm, "application/vnd.smaf").await?;
+            let result: jvm::Result<ClassInstanceRef<Player>> = jvm
+                .invoke_static(
+                    "javax/microedition/media/Manager",
+                    "createPlayer",
+                    "(Ljava/io/InputStream;Ljava/lang/String;)Ljavax/microedition/media/Player;",
+                    (stream, content_type),
+                )
+                .await;
+            let Err(JavaError::JavaException(error)) = result else {
+                panic!("Expected MediaException")
+            };
+            assert!(jvm.is_instance(&*error, "javax/microedition/media/MediaException"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn manager_detects_smaf_without_a_type_and_rejects_null_stream() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let mut data = jvm.instantiate_array("B", 10).await?;
+            jvm.store_array(&mut data, 0, [77i8, 77, 77, 68, 0, 0, 0, 2, 0, 0]).await?;
+            let stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (data,)).await?;
+            let player: ClassInstanceRef<Player> = jvm
+                .invoke_static(
+                    "javax/microedition/media/Manager",
+                    "createPlayer",
+                    "(Ljava/io/InputStream;Ljava/lang/String;)Ljavax/microedition/media/Player;",
+                    (stream, None),
+                )
+                .await?;
+            assert!(!player.is_null());
+            let result: jvm::Result<ClassInstanceRef<Player>> = jvm
+                .invoke_static(
+                    "javax/microedition/media/Manager",
+                    "createPlayer",
+                    "(Ljava/io/InputStream;Ljava/lang/String;)Ljavax/microedition/media/Player;",
+                    (None, None),
+                )
+                .await;
+            let Err(JavaError::JavaException(error)) = result else {
+                panic!("Expected IllegalArgumentException")
+            };
+            assert!(jvm.is_instance(&*error, "java/lang/IllegalArgumentException"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_unsupported_player_controls() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let mut data = jvm.instantiate_array("B", 10).await?;
+            jvm.store_array(&mut data, 0, [77i8, 77, 77, 68, 0, 0, 0, 2, 0, 0]).await?;
             let stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (data,)).await?;
             let content_type = JavaLangString::from_rust_string(&jvm, "application/vnd.smaf").await?;
             let player: ClassInstanceRef<Player> = jvm

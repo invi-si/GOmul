@@ -4006,8 +4006,6 @@ dependencies = [
 [[package]]
 name = "rustjava-runtime"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7970d8bf4d27c4c0239d9e99472c0b18bb92901d54ae8310c2e8aa75cea7058"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -4016,11 +4014,13 @@ dependencies = [
  "encoding_rs",
  "hashbrown 0.17.1",
  "jvm",
+ "jvm-bytecode",
  "jvm-class-proto",
  "jvm-types",
  "libm",
  "parking_lot",
  "regex",
+ "tokio",
  "tracing",
  "tracing-attributes",
  "url",
@@ -5264,7 +5264,19 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -6080,6 +6092,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "directories",
  "jni 0.21.1",
  "libc",
@@ -6117,6 +6130,7 @@ dependencies = [
  "ab_glyph",
  "async-trait",
  "bytemuck",
+ "crc32fast",
  "futures-test",
  "hashbrown 0.17.1",
  "image",
@@ -6276,6 +6290,7 @@ dependencies = [
  "jvm-class-proto",
  "jvm-types",
  "rustjava-runtime",
+ "spin",
  "test-utils",
  "tracing",
  "wie-backend",
@@ -6340,7 +6355,9 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "log",
+ "serde",
  "serde_json",
+ "sha2",
  "time",
  "tracing",
  "tracing-subscriber",

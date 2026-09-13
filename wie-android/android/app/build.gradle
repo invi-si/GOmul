@@ -1,18 +1,22 @@
 plugins { id 'com.android.application' }
 def traceBuild = project.hasProperty('gomulTrace')
+def thorBuild = project.hasProperty('gomulThor')
+if (traceBuild && thorBuild) { throw new GradleException('Choose either gomulThor or gomulTrace') }
 android {
     namespace 'local.wie.nativeapp'
     compileSdk 36
     defaultConfig {
-        applicationId traceBuild ? 'local.wie.nativeapp.trace' : 'local.wie.nativeapp'
-        manifestPlaceholders = [appLabel: traceBuild ? 'GOmul Trace' : 'GOmul', shellProfileable: traceBuild ? 'true' : 'false']
+        applicationId thorBuild ? 'local.wie.nativeapp.thor' : traceBuild ? 'local.wie.nativeapp.trace' : 'local.wie.nativeapp'
+        buildConfigField 'boolean', 'THOR', thorBuild.toString()
+        manifestPlaceholders = [appLabel: thorBuild ? 'GOmul Thor' : traceBuild ? 'GOmul Trace' : 'GOmul', shellProfileable: traceBuild ? 'true' : 'false']
         testInstrumentationRunner "local.wie.nativeapp.RescueInstrumentation"
         minSdk 26
         targetSdk 36
-        versionCode 7
+        versionCode 8
         versionName '0.1.0'
         ndk { abiFilters 'arm64-v8a' }
     }
+    buildFeatures { buildConfig true }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     buildTypes {
         debug { debuggable true }

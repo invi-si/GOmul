@@ -27,7 +27,7 @@ impl JavaClassInstance {
     }
 
     pub fn new(core: &mut ArmCore, class: &JavaClassDefinition) -> Result<Self> {
-        Self::instantiate(core, class, class.instance_field_word_count()? * size_of::<LgtJvmWord>())
+        Self::instantiate(core, class, class.instance_storage_word_count()? * size_of::<LgtJvmWord>())
     }
 
     pub fn instantiate(core: &mut ArmCore, class: &JavaClassDefinition, storage_size: usize) -> Result<Self> {
@@ -71,11 +71,26 @@ impl JavaClassInstance {
     }
 
     pub fn storage_size(&self) -> Result<usize> {
-        Ok(self.class()?.instance_field_word_count()? * size_of::<LgtJvmWord>())
+        Ok(self.class()?.instance_storage_word_count()? * size_of::<LgtJvmWord>())
     }
 
-    fn field_address(&self, word_index: u32) -> Result<u32> {
-        self.storage_address(word_index as usize * size_of::<LgtJvmWord>())
+    fn field_address(&self, field: &dyn Field, word_index: u32) -> Result<u32> {
+        let class = self.class()?;
+        let mut offset = word_index as usize;
+        if class.descriptor()?.ptr_vtable != 0 {
+            if let Some(field) = field.as_any().downcast_ref::<JavaField>() {
+                let owner = JavaClassDefinition::from_raw(field.raw()?.ptr_class, &self.core);
+                let fixed = crate::runtime::java::abi::JAVA_ABI.class(&owner.name()).is_some_and(|abi| {
+                    abi.field
+                        .iter()
+                        .any(|entry| entry.name == field.name() && entry.descriptor == field.descriptor())
+                });
+                if owner.descriptor()?.ptr_vtable == 0 && !fixed {
+                    offset += class.instance_field_word_count()?;
+                }
+            }
+        }
+        self.storage_address(offset * size_of::<LgtJvmWord>())
     }
 }
 
@@ -122,7 +137,7 @@ impl ClassInstance for JavaClassInstance {
         } else {
             field.as_any().downcast_ref::<JavaReferenceField>().unwrap().word_index
         };
-        let address = self.field_address(word_index).unwrap();
+        let address = self.field_address(field, word_index).unwrap();
         let low = read_generic(&self.core, address).unwrap();
         let codec = JavaValueCodec::new(&self.core);
 
@@ -141,7 +156,7 @@ impl ClassInstance for JavaClassInstance {
         } else {
             field.as_any().downcast_ref::<JavaReferenceField>().unwrap().word_index
         };
-        let address = self.field_address(word_index).unwrap();
+        let address = self.field_address(field, word_index).unwrap();
         let codec = JavaValueCodec::new(&self.core);
 
         if matches!(value, JavaValue::Long(_) | JavaValue::Double(_)) {

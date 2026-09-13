@@ -38,6 +38,13 @@ pub struct LgtEmulator {
     system: System,
 }
 
+impl Drop for LgtEmulator {
+    fn drop(&mut self) {
+        self.system.shutdown();
+        self.core.shutdown();
+    }
+}
+
 impl LgtEmulator {
     /// A diagnostics-only controller; cloning this handle does not copy or
     /// replace architectural CPU state.

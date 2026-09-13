@@ -7,6 +7,7 @@ use crate::{AudioCommand, AudioEventData, AudioHandle, AudioSequence, AudioSink,
 #[derive(Debug)]
 pub enum AudioError {
     InvalidHandle,
+    InvalidData,
 }
 
 pub struct Audio {
@@ -27,8 +28,15 @@ impl Audio {
     }
 
     pub fn load_smaf(&mut self, data: &[u8]) -> Result<AudioHandle, AudioError> {
+        // parse_smaf intentionally returns an empty sequence on parse failure.
+        // Preserve its existing dialect/padding tolerance, but expose actual
+        // container failures before allocating a successful playback handle.
+        let events = parse_smaf(data);
+        if events.is_empty() {
+            smaf::Smaf::parse(data).map_err(|_| AudioError::InvalidData)?;
+        }
         let audio_handle = self.last_audio_handle;
-        let sequence = Arc::new(convert_smaf_events(parse_smaf(data)));
+        let sequence = Arc::new(convert_smaf_events(events));
 
         self.last_audio_handle += 1;
         self.files.insert(audio_handle, sequence);
@@ -147,10 +155,27 @@ mod tests {
     }
 
     #[test]
+    fn invalid_data_does_not_allocate_or_disturb_playing_audio() {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let mut audio = Audio::new(Box::new(RecordingSink(commands.clone())));
+        for data in [&b""[..], &b"not a sound"[..], &b"MMMD\0\0"[..]] {
+            assert!(matches!(audio.load_smaf(data), Err(super::AudioError::InvalidData)));
+        }
+        assert!(audio.files.is_empty());
+        assert_eq!(audio.last_audio_handle, 0);
+        let handle = audio.load_smaf(b"MMMD\0\0\0\x02\0\0").unwrap();
+        audio.play(handle, false).unwrap();
+        assert!(audio.load_smaf(b"invalid replacement").is_err());
+        assert!(audio.playing.contains(&handle));
+        assert_eq!(audio.files.len(), 1);
+        assert_eq!(commands.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn replay_stops_previous_playback_before_starting_again() {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let mut audio = Audio::new(Box::new(RecordingSink(commands.clone())));
-        let handle = audio.load_smaf(&[]).unwrap();
+        let handle = audio.load_smaf(b"MMMD\0\0\0\x02\0\0").unwrap();
 
         audio.play(handle, false).unwrap();
         audio.play(handle, true).unwrap();
@@ -180,7 +205,7 @@ mod tests {
     fn close_stops_playback_and_removes_the_handle() {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let mut audio = Audio::new(Box::new(RecordingSink(commands.clone())));
-        let handle = audio.load_smaf(&[]).unwrap();
+        let handle = audio.load_smaf(b"MMMD\0\0\0\x02\0\0").unwrap();
 
         audio.play(handle, false).unwrap();
         audio.close(handle).unwrap();

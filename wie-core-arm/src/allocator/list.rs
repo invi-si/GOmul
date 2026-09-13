@@ -35,6 +35,31 @@ const CANARY_VALUE: u32 = 0xDEADBEEF;
 pub struct ListAllocator;
 
 impl ListAllocator {
+    pub fn total_memory(size: u32) -> u32 {
+        size.saturating_sub(size_of::<ListAllocationHeader>() as u32 + CANARY_SIZE)
+    }
+
+    pub fn free_memory(core: &ArmCore, base: u32, size: u32) -> Result<u32> {
+        let end = base + size;
+        let mut cursor = base;
+        let mut free = 0;
+        let mut run = 0;
+        while cursor < end {
+            let header: ListAllocationHeader = read_generic(core, cursor)?;
+            if header.size() < 4 || header.size() % 4 != 0 || header.size() > end - cursor {
+                return Err(WieError::FatalError(format!("Invalid allocation header at {cursor:#x}")));
+            }
+            if header.in_use() {
+                free += Self::total_memory(run);
+                run = 0;
+            } else {
+                run += header.size();
+            }
+            cursor += header.size();
+        }
+        Ok(free + Self::total_memory(run))
+    }
+
     pub fn init(core: &mut ArmCore, base_address: u32, size: u32) -> Result<()> {
         let header = ListAllocationHeader::new(size, false);
 
