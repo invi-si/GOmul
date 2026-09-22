@@ -8,7 +8,11 @@ use std::{
 use wie_backend::{Event, KeyCode};
 
 const LIMIT: usize = 64 * 1024 * 1024;
-const BUILD: Option<&str> = option_env!("GOMUL_CHECKPOINT_BUILD");
+const BUILD: Option<&str> = match option_env!("GOMUL_CHECKPOINT_BUILD") {
+    Some(build) => Some(build),
+    None if cfg!(test) => Some("gomul-checkpoint-test-build"),
+    None => None,
+};
 const MAGIC: &[u8] = b"GOmul replay alpha4 v1\0";
 const KEYS: [KeyCode; 24] = [
     KeyCode::UP,
@@ -55,6 +59,7 @@ pub struct Tape {
     pub error: Option<String>,
     offset: i128,
     speed_clock: Option<(u64, u64, u32)>,
+    paused_clock: Option<u64>,
     safe_end: usize,
     safe_clock: Option<(usize, [u8; 4])>,
 }
@@ -126,14 +131,29 @@ impl Tape {
         self.take(8).map(|v| u64::from_le_bytes(v.try_into().unwrap())).unwrap_or(0)
     }
     fn live_wall(&self, host: u64) -> u64 {
+        if let Some(value) = self.paused_clock {
+            return value;
+        }
         match self.speed_clock {
             Some((anchor, value, rate)) => value.saturating_add(host.saturating_sub(anchor).saturating_mul(rate as u64) / 1000),
             None => host,
         }
     }
     pub fn set_speed(&mut self, rate: u32) {
-        let host = wall();
+        self.set_speed_at(rate, wall());
+    }
+    fn set_speed_at(&mut self, rate: u32, host: u64) {
         self.speed_clock = Some((host, self.live_wall(host), rate.clamp(250, 3000)));
+    }
+    pub fn set_paused(&mut self, paused: bool) {
+        self.set_paused_at(paused, wall());
+    }
+    fn set_paused_at(&mut self, paused: bool, host: u64) {
+        if paused {
+            self.paused_clock = Some(self.live_wall(host));
+        } else if let Some(value) = self.paused_clock.take() {
+            self.speed_clock = Some((host, value, self.speed_clock.map_or(1000, |(_, _, rate)| rate)));
+        }
     }
     pub fn now(&mut self) -> u64 {
         if self.cursor.is_some() {
@@ -396,6 +416,7 @@ impl Slots {
     ) -> anyhow::Result<(Tape, BTreeMap<PathBuf, Option<Vec<u8>>>, Vec<u8>, BTreeMap<PathBuf, Option<Vec<u8>>>)> {
         let diagnostic = cfg!(feature = "rescue-replay") && matches!(name, "rescue-capture" | "rescue-verify");
         let slot = self.slot(if diagnostic { "quick" } else { name });
+        anyhow::ensure!(slot.is_dir(), "No checkpoint in this slot");
         anyhow::ensure!(
             diagnostic || Some(fs::read_to_string(slot.join("build-id"))?.as_str()) == BUILD,
             "Checkpoint needs the APK build that created it"
@@ -528,6 +549,38 @@ mod speed_tests {
         assert_eq!(replay.now(), value);
         assert!(replay.done());
     }
+    #[test]
+    fn pause_excludes_background_time_at_every_supported_speed() {
+        for rate in (250..=3000).step_by(250) {
+            let mut tape = Tape::default();
+            tape.set_speed_at(rate, 1000);
+            let before_pause = tape.live_wall(2000);
+            tape.set_paused_at(true, 2000);
+            tape.set_paused_at(true, 3000);
+            assert_eq!(tape.live_wall(62_000), before_pause);
+            tape.set_paused_at(false, 62_000);
+            assert_eq!(tape.live_wall(62_000), before_pause);
+            assert_eq!(tape.live_wall(63_000), before_pause + rate as u64);
+            tape.set_paused_at(false, 63_000);
+            assert_eq!(tape.live_wall(64_000), before_pause + 2 * rate as u64);
+            assert!(tape.bytes.is_empty());
+        }
+    }
+    #[test]
+    fn changing_speed_while_paused_preserves_time_and_replay_samples() {
+        let mut tape = Tape::default();
+        tape.set_speed_at(1000, 1000);
+        tape.set_paused_at(true, 2000);
+        let before = tape.now();
+        tape.set_speed_at(3000, 30_000);
+        assert_eq!(tape.now(), before);
+        tape.set_paused_at(false, 60_000);
+        assert_eq!(tape.live_wall(60_100), before + 300);
+        let mut replay = Tape::replay(tape.bytes);
+        assert_eq!(replay.now(), before);
+        assert_eq!(replay.now(), before);
+        assert!(replay.done());
+    }
 }
 
 // Keep the original quick-save directory as slot 1; recovery/startup remain separate.
@@ -546,6 +599,74 @@ pub fn quick_action(action: &str) -> (&str, &str) {
 #[cfg(test)]
 mod slot_tests {
     use super::*;
+
+    fn fixture(label: &str) -> (PathBuf, Slots) {
+        let root = std::env::temp_dir().join(format!("gomul-{label}-{}-{}", std::process::id(), wall()));
+        let save = root.join("saves/game");
+        fs::create_dir_all(&save).unwrap();
+        fs::write(save.join("progress"), b"initial").unwrap();
+        let slots = Slots::new(save.to_str().unwrap()).unwrap();
+        fs::write(save.join("progress"), b"saved").unwrap();
+        slots.store("quick", &Tape::default(), b"frame", b"archive").unwrap();
+        fs::write(save.join("progress"), b"current").unwrap();
+        (root, slots)
+    }
+
+    #[test]
+    fn interrupted_load_rolls_back_on_next_launch_and_commit_stays_committed() {
+        let (root, slots) = fixture("load-rollback");
+        slots.begin_load("quick", b"archive").unwrap();
+        assert_eq!(fs::read(slots.save.join("progress")).unwrap(), b"initial");
+        fs::write(slots.save.join("progress"), b"unfinished replay").unwrap();
+        fs::write(slots.save.join("new-during-replay"), b"remove on rollback").unwrap();
+        let reopened = Slots::new(slots.save.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read(reopened.save.join("progress")).unwrap(), b"current");
+        assert!(!reopened.save.join("new-during-replay").exists());
+        assert!(!reopened.root.join("rollback").exists());
+        reopened.begin_load("quick", b"archive").unwrap();
+        fs::write(reopened.save.join("progress"), b"saved").unwrap();
+        reopened.commit_load().unwrap();
+        let committed = Slots::new(reopened.save.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read(committed.save.join("progress")).unwrap(), b"saved");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_slot_publication_keeps_previous_slot_loadable() {
+        let (root, slots) = fixture("slot-publication");
+        fs::rename(slots.root.join("quick"), slots.root.join("quick-old")).unwrap();
+        fs::create_dir(slots.root.join("writing")).unwrap();
+        fs::write(slots.root.join("writing/trace"), b"unfinished").unwrap();
+        let reopened = Slots::new(slots.save.to_str().unwrap()).unwrap();
+        let (_, _, frame, expected) = reopened.begin_load("quick", b"archive").unwrap();
+        assert_eq!(frame, b"frame");
+        assert_eq!(expected.get(&PathBuf::from("progress")).unwrap(), &Some(b"saved".to_vec()));
+        reopened.rollback().unwrap();
+        reopened.store("quick", &Tape::default(), b"replacement", b"archive").unwrap();
+        assert_eq!(fs::read(reopened.slot("quick").join("frame")).unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_slot_identity_leaves_current_progress_intact() {
+        let (root, slots) = fixture("slot-identity");
+        let current = tree(&slots.save).unwrap();
+        assert_eq!(
+            slots.begin_load("quick-3", b"archive").err().unwrap().to_string(),
+            "No checkpoint in this slot"
+        );
+        assert_eq!(tree(&slots.save).unwrap(), current);
+        for name in ["build-id", "format", "archive-id"] {
+            let path = slots.slot("quick").join(name);
+            let original = fs::read(&path).unwrap();
+            fs::write(&path, b"wrong").unwrap();
+            assert!(slots.begin_load("quick", b"archive").is_err(), "{name}");
+            assert_eq!(tree(&slots.save).unwrap(), current);
+            assert!(!slots.root.join("rollback").exists());
+            fs::write(path, original).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn numbered_actions_preserve_legacy_and_special_slots() {
         for (number, directory) in [(1, "quick"), (2, "quick-2"), (3, "quick-3")] {
@@ -559,9 +680,6 @@ mod slot_tests {
     }
     #[test]
     fn numbered_slots_and_games_do_not_overwrite_each_other() {
-        if BUILD.is_none() {
-            return;
-        }
         let root = std::env::temp_dir().join(format!("gomul-three-slots-{}-{}", std::process::id(), wall()));
         for game in ["a", "b"] {
             let save = root.join("saves").join(game);

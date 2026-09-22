@@ -326,6 +326,8 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
                     let _ = reply.send(local_web::snapshot_storage(&slots).map_err(|error| error.to_string()));
                 }
                 Command::Checkpoint(action, reply) => {
+                    // Disk I/O and reconstruction are host work, not guest time.
+                    tape.lock().unwrap().set_paused(true);
                     let (action, quick_slot) = checkpoint::quick_action(&action);
                     for (key, _) in held.drain() {
                         deliver(&mut *emulator, &tape, Event::Keyup(key));
@@ -386,6 +388,7 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
                     if result.is_err() && slots.root.join("rollback").exists() {
                         halted = true;
                     }
+                    tape.lock().unwrap().set_paused(paused);
                     if action != "save" && action != "save-startup" {
                         let mut queue = shared.audio.lock().unwrap();
                         queue.clear();
@@ -405,6 +408,7 @@ fn run(path: String, save: String, shared: Arc<Shared>, rx: Receiver<Command>) -
                 }
                 Command::Pause(value) => {
                     paused = value;
+                    tape.lock().unwrap().set_paused(value);
                     for (key, _) in held.drain() {
                         deliver(&mut *emulator, &tape, Event::Keyup(key));
                     }

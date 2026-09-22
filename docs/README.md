@@ -9,6 +9,7 @@
 - [참고 프로젝트와 구현 범위](references.ko.md)
 - [라이선스·출처](../THIRD_PARTY_NOTICES.md)
 - [공개 갱신 검증](public-update-20260914.md)
+- [Android 안정성 점검](android-reliability-20260923.md)
 
 ## 세부 개발 기록
 

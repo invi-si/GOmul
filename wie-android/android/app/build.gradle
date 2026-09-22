@@ -12,17 +12,28 @@ android {
         testInstrumentationRunner "local.wie.nativeapp.RescueInstrumentation"
         minSdk 26
         targetSdk 36
-        versionCode 8
-        versionName '0.1.0'
+        versionCode 9
+        versionName '0.1.1'
         ndk { abiFilters 'arm64-v8a' }
     }
     buildFeatures { buildConfig true }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    signingConfigs {
+        if (System.getenv('GOMUL_KEYSTORE')) {
+            distribution {
+                storeFile file(System.getenv('GOMUL_KEYSTORE'))
+                storePassword System.getenv('GOMUL_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('GOMUL_KEY_ALIAS')
+                keyPassword System.getenv('GOMUL_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
         debug { debuggable true }
         release {
             debuggable false
             if (traceBuild) { signingConfig signingConfigs.debug }
+            else if (System.getenv('GOMUL_KEYSTORE')) { signingConfig signingConfigs.distribution }
         }
     }
 }

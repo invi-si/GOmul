@@ -19,6 +19,20 @@ rustup target add aarch64-linux-android
 adb install -r wie-android/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+디버깅을 끈 배포 APK는 다음 환경변수를 설정한 뒤 빌드합니다. 키와 암호는 저장소에 넣지 않습니다.
+
+- `GOMUL_KEYSTORE`: 기존 앱과 동일한 서명 키 파일의 절대 경로
+- `GOMUL_KEYSTORE_PASSWORD`: 키 저장소 암호
+- `GOMUL_KEY_ALIAS`: 서명 별칭
+- `GOMUL_KEY_PASSWORD`: 해당 키의 암호
+
+```sh
+./wie-android/build.sh release
+adb install -r wie-android/android/app/build/outputs/apk/release/app-release.apk
+```
+
+산출물은 `release/app-release.apk`이며 `debuggable=false`입니다. 키를 바꾸면 기존 앱 위에 설치되지 않습니다. 기존 배포판과의 업데이트 호환성을 위해 보관 중인 서명 키를 사용합니다. 디버깅 해제와 새 스토어용 키 발급은 별개이며, 이 명령이 서명 키를 생성하거나 자동 교체하지는 않습니다.
+
 AYN Thor 옵션은 같은 빌드 환경에서 `GOMUL_THOR=1 ./wie-android/build.sh`로 실행합니다. 상단 화면과 물리 컨트롤 중심의 별도 앱 ID를 사용합니다. [세부 기록](ayn-thor.md)을 참고하세요.
 
 네이티브 빌드는 검증된 Thumb inline/table 옵션을 사용하며 지원하지 않는 실행 경로는 인터프리터로 돌아갑니다. 새로운 CPU 실험을 임의로 활성화하지 마세요.

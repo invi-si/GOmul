@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use directories::ProjectDirs;
 
@@ -173,6 +178,28 @@ impl Database {
     fn get_path_for_record(&self, id: RecordId) -> PathBuf {
         self.base_path.join(id.to_string())
     }
+
+    fn replace_record(&self, id: RecordId, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
+        static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
+        let (temporary, mut file) = loop {
+            let sequence = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
+            let path = self.base_path.join(format!(".gomul-record-{}-{sequence}.tmp", std::process::id()));
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => break (path, file),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let result = write(&mut file);
+        drop(file);
+        // A failed or interrupted write must leave the previous record intact.
+        // Same-directory rename publishes only the complete replacement.
+        let result = result.and_then(|()| fs::rename(&temporary, self.get_path_for_record(id)));
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
 }
 
 #[async_trait::async_trait]
@@ -186,8 +213,7 @@ impl wie_backend::Database for Database {
 
         tracing::trace!("Adding record {id} to database {:?}", &self.base_path);
 
-        let path = self.get_path_for_record(id);
-        fs::write(path, data).unwrap();
+        self.replace_record(id, |file| file.write_all(data)).unwrap();
 
         id
     }
@@ -201,11 +227,9 @@ impl wie_backend::Database for Database {
     }
 
     async fn set(&mut self, id: RecordId, data: &[u8]) -> bool {
-        let path = self.get_path_for_record(id);
-
         tracing::trace!("Set record {id} to database {:?}", &self.base_path);
 
-        fs::write(path, data).is_ok()
+        self.replace_record(id, |file| file.write_all(data)).is_ok()
     }
 
     async fn delete(&mut self, id: RecordId) -> bool {
@@ -219,8 +243,11 @@ impl wie_backend::Database for Database {
     async fn get_record_ids(&self) -> Vec<RecordId> {
         fs::read_dir(&self.base_path)
             .unwrap()
-            .filter(|x| x.as_ref().unwrap().path().is_file())
-            .map(|x| x.unwrap().file_name().to_str().unwrap().parse().unwrap())
+            // Interrupted writes and imported sidecar files are not guest records.
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_file().then(|| entry.file_name().to_str()?.parse().ok())?
+            })
             .collect()
     }
 }
@@ -256,5 +283,43 @@ mod tests {
         };
         let path = repo.get_path_for_database("/../save0.dat", "PD140106");
         assert!(path.starts_with(PathBuf::from("/tmp/wie_test/PD140106/db")));
+    }
+
+    #[test]
+    fn failed_replacement_preserves_record_and_cleans_partial_write() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("gomul-atomic-record-{}", std::process::id()));
+        let db = Database::new(root.clone()).unwrap();
+        fs::write(db.get_path_for_record(1), b"original progress").unwrap();
+        let error = db.replace_record(1, |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("simulated disk write failure"))
+        });
+        assert!(error.is_err());
+        assert_eq!(fs::read(db.get_path_for_record(1)).unwrap(), b"original progress");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        db.replace_record(1, |file| file.write_all(b"new")).unwrap();
+        assert_eq!(fs::read(db.get_path_for_record(1)).unwrap(), b"new");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_write_and_sidecar_are_not_records() {
+        use super::*;
+        use wie_backend::Database as _;
+        let root = std::env::temp_dir().join(format!("gomul-record-list-{}", std::process::id()));
+        let db = Database::new(root.clone()).unwrap();
+        for (name, bytes) in [
+            ("1", b"complete".as_slice()),
+            (".gomul-record-interrupted.tmp", b"partial"),
+            (".DS_Store", b"sidecar"),
+        ] {
+            fs::write(root.join(name), bytes).unwrap();
+        }
+        let mut ids = db.get_record_ids();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(ids.as_mut().poll(&mut context), std::task::Poll::Ready(vec![1]));
+        fs::remove_dir_all(root).unwrap();
     }
 }

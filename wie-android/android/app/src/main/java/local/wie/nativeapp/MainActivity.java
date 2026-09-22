@@ -22,7 +22,8 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public final class MainActivity extends Activity implements Choreographer.FrameCallback {
- private final ExecutorService io=Executors.newSingleThreadExecutor();
+ // Serialize native ownership across Activity recreation; an old stop cannot overtake a new start.
+ private static final ExecutorService io=Executors.newSingleThreadExecutor();
  private final Set<String> held=new HashSet<>();
  private LinearLayout root;private TextView status;private GameView gameView;private AudioOutput audio;
  private File dataImportGame;
@@ -48,6 +49,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   if(BuildConfig.THOR&&activeGame!=null&&!starting&&!checkpointBusy&&controller.motion(event,gamePreferences(activeGame)))return true;
   return super.onGenericMotionEvent(event);
  }
+ private void postIfAlive(Runnable action){runOnUiThread(()->{if(!isFinishing()&&!isDestroyed())action.run();});}
  private long nextInput=0,nextDraw=0;
  private final long[] frameMetadata=new long[2];
  private final Map<String,Long> pressIds=new HashMap<>();
@@ -124,7 +126,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    if(controller!=null){controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);if(playing)controller.hide(WindowInsets.Type.systemBars());else controller.show(WindowInsets.Type.systemBars());}
   }else getWindow().getDecorView().setSystemUiVisibility(playing?View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION:0);
  }
- @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(!focused&&BuildConfig.THOR)releaseKeys();if(focused)updateSystemBars();}
+ @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(!focused)releaseKeys();if(focused)updateSystemBars();}
  private Button button(String title,Runnable action){
   Button b=new Button(this);b.setText(title);b.setAllCaps(false);b.setTextColor(ACCENT);b.setTextSize(15);b.setGravity(Gravity.CENTER);b.setMinHeight(0);b.setMinimumHeight(0);b.setMinWidth(0);b.setMinimumWidth(0);b.setPadding(dp(14),dp(8),dp(14),dp(8));
   b.setBackground(metalKey(false));b.setShadowLayer(dp(0.6f),0,dp(0.7f),0xfffafbfc);b.setStateListAnimator(null);b.setOnClickListener(v->action.run());return b;
@@ -155,8 +157,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
       try{
        java.nio.file.Files.delete(game.toPath());
        File[] remaining=game.getParentFile().listFiles();if(remaining!=null&&remaining.length==0)game.getParentFile().delete();
-       runOnUiThread(()->{starting=false;showLibrary();Toast.makeText(this,"게임을 삭제했습니다",Toast.LENGTH_SHORT).show();});
-      }catch(Exception failure){runOnUiThread(()->{starting=false;error(failure);});}
+       postIfAlive(()->{starting=false;showLibrary();Toast.makeText(this,"게임을 삭제했습니다",Toast.LENGTH_SHORT).show();});
+      }catch(Exception failure){postIfAlive(()->{starting=false;error(failure);});}
      });
     }).show();
   }).show();
@@ -166,8 +168,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    .setMessage("초기화할 게임: "+game.getName()+"\n진행 상황, 빠른 저장 및 불러오기 복구 데이터가 삭제됩니다. 게임 파일, 화면·속도 설정 및 가상 전화번호는 유지됩니다. 함께 제공된 초기 데이터는 다음 실행 시 다시 가져옵니다. 이 작업은 되돌릴 수 없습니다.")
    .setNegativeButton("취소",null).setPositiveButton("저장 데이터 초기화",(dialog,which)->{
     if(starting)return;starting=true;io.execute(()->{
-     try{GameSaveReset.reset(getFilesDir(),game.getParentFile().getName());runOnUiThread(()->{starting=false;Toast.makeText(this,"초기화했습니다. 게임을 열면 처음부터 시작합니다.",Toast.LENGTH_LONG).show();});}
-     catch(Exception failure){runOnUiThread(()->{starting=false;error(failure);});}
+     try{GameSaveReset.reset(getFilesDir(),game.getParentFile().getName());postIfAlive(()->{starting=false;Toast.makeText(this,"초기화했습니다. 게임을 열면 처음부터 시작합니다.",Toast.LENGTH_LONG).show();});}
+     catch(Exception failure){postIfAlive(()->{starting=false;error(failure);});}
     });
    }).show();
  }
@@ -206,8 +208,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    .setPositiveButton("가져와서 실행",(dialog,which)->installData(game,plan,number.getText().toString(),replace)).setNegativeButton("취소",null).show();
  }
  private void installData(File game,GameDataImport.Plan plan,String phone,boolean replace){
-  starting=true;io.execute(()->{try{GameDataImport.install(saveFolder(game),plan,phone,replace);runOnUiThread(()->{starting=false;Toast.makeText(this,"저장 데이터를 가져왔습니다",Toast.LENGTH_SHORT).show();launch(game);});}
-   catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
+  starting=true;io.execute(()->{try{GameDataImport.install(saveFolder(game),plan,phone,replace);postIfAlive(()->{starting=false;Toast.makeText(this,"저장 데이터를 가져왔습니다",Toast.LENGTH_SHORT).show();launch(game);});}
+   catch(Exception error){postIfAlive(()->{starting=false;error(error);});}});
  }
  private void offerDataImport(File game,GameDataImport.Plan plan,boolean separate){
   if(plan==null){if(separate)error(new IOException("함께 제공된 저장 데이터가 없습니다."));else launch(game);return;}
@@ -221,7 +223,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  @Override protected void onActivityResult(int request,int result,Intent data){
   super.onActivityResult(request,result,data);
   if(request==4){File prepared=rescueExport;rescueExport=null;rescueBusy=false;
-   if(prepared!=null){if(result==RESULT_OK&&data!=null&&data.getData()!=null){Uri destination=data.getData();io.execute(()->{try(InputStream in=new FileInputStream(prepared);OutputStream out=getContentResolver().openOutputStream(destination)){if(out==null)throw new IOException("오류 보고서를 내보낼 수 없습니다");byte[] buffer=new byte[65536];int n;while((n=in.read(buffer))!=-1)out.write(buffer,0,n);runOnUiThread(()->Toast.makeText(this,"오류 보고서를 내보냈습니다",Toast.LENGTH_LONG).show());}catch(Exception e){runOnUiThread(()->rescueError(e));}finally{prepared.delete();}});}else prepared.delete();}return;}
+   if(prepared!=null){if(result==RESULT_OK&&data!=null&&data.getData()!=null){Uri destination=data.getData();io.execute(()->{try(InputStream in=new FileInputStream(prepared);OutputStream out=getContentResolver().openOutputStream(destination)){if(out==null)throw new IOException("오류 보고서를 내보낼 수 없습니다");byte[] buffer=new byte[65536];int n;while((n=in.read(buffer))!=-1)out.write(buffer,0,n);postIfAlive(()->Toast.makeText(this,"오류 보고서를 내보냈습니다",Toast.LENGTH_LONG).show());}catch(Exception e){postIfAlive(()->rescueError(e));}finally{prepared.delete();}});}else prepared.delete();}return;}
 
   if(result!=RESULT_OK||data==null||request<1||request>3)return;Uri uri=data.getData();if(uri==null)return;
   File selected=dataImportGame;starting=true;Toast.makeText(this,"파일을 읽는 중…",Toast.LENGTH_SHORT).show();
@@ -235,8 +237,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
      plan=GameDataImport.inspect(game,temporary);
     }finally{temporary.delete();}}
    }
-   File ready=game;GameDataImport.Plan pending=plan;runOnUiThread(()->{starting=false;showLibrary();offerDataImport(ready,pending,request!=1);});
-  }catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
+   File ready=game;GameDataImport.Plan pending=plan;postIfAlive(()->{starting=false;showLibrary();offerDataImport(ready,pending,request!=1);});
+  }catch(Exception error){postIfAlive(()->{starting=false;error(error);});}});
  }
  private File importGame(Uri uri)throws Exception {
   String name="game.jar";try(Cursor c=getContentResolver().query(uri,new String[]{OpenableColumns.DISPLAY_NAME},null,null,null)){if(c!=null&&c.moveToFirst()){String displayName=c.getString(0);if(displayName!=null&&!displayName.isEmpty())name=displayName;}}
@@ -260,8 +262,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     if(identity.isFile())plan=new GameDataImport.Plan(plan.pid,plan.files,new String(java.nio.file.Files.readAllBytes(identity.toPath()),java.nio.charset.StandardCharsets.UTF_8).trim());
    }
    GameDataImport.Plan pending=plan;boolean keepProgress=plan!=null&&GameDataImport.hasProgress(save);
-   runOnUiThread(()->{starting=false;if(pending==null||keepProgress)launchPrepared(file);else finishDataImport(file,pending,save.exists());});
-  }catch(Exception error){runOnUiThread(()->{starting=false;error(error);});}});
+   postIfAlive(()->{starting=false;if(pending==null||keepProgress)launchPrepared(file);else finishDataImport(file,pending,save.exists());});
+  }catch(Exception error){postIfAlive(()->{starting=false;error(error);});}});
  }
  private void launchPrepared(File file){if(starting)return;starting=true;activeGame=file;koreanKeypad=false;rescueShown=false;rescueSessionStart=System.currentTimeMillis();showGame();status.setText("불러오는 중…");audio.stopAll();io.execute(()->{try{
    numericDirections=GameDataImport.isInotiaCompanionBundle(file);
@@ -275,10 +277,10 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
      Thread.sleep(750);result=checkpointRequest("GET",requestId,null);
     }
     if(result.has("error"))throw new IOException(result.getString("error"));
-    if(!result.optBoolean("startNormally")){runOnUiThread(()->starting=false);return;}
+    if(!result.optBoolean("startNormally")){postIfAlive(()->starting=false);return;}
    }
    writeDisplayOptions(file);
-   NativeBridge.start(file.getAbsolutePath(),new File(getFilesDir(),"saves/"+file.getParentFile().getName()).getAbsolutePath());applySpeed(playbackPreferences().getInt("speed",1000));NativeBridge.pause(!foreground);runOnUiThread(()->starting=false);}catch(Exception e){runOnUiThread(()->{starting=false;error(e);});}});}
+   NativeBridge.start(file.getAbsolutePath(),new File(getFilesDir(),"saves/"+file.getParentFile().getName()).getAbsolutePath());applySpeed(playbackPreferences().getInt("speed",1000));NativeBridge.pause(!foreground);postIfAlive(()->starting=false);}catch(Exception e){postIfAlive(()->{starting=false;error(e);});}});}
  private android.content.SharedPreferences gamePreferences(File game){return getSharedPreferences("game-settings-"+game.getParentFile().getName(),MODE_PRIVATE);}
  private void writeDisplayOptions(File game)throws IOException{
   android.content.SharedPreferences p=gamePreferences(game);File dir=new File(getFilesDir(),"saves/"+game.getParentFile().getName());dir.mkdirs();File options=new File(dir,"display-options");
@@ -324,7 +326,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   AlertDialog dialog=new AlertDialog.Builder(this).setTitle("화면 크기").setView(box).setPositiveButton("적용 후 재시작",null).setNeutralButton("자동 설정 후 재시작",(d,w)->{p.edit().putBoolean("customDisplay",false).apply();restartWithSettings(game);}).setNegativeButton("취소",null).create();
   dialog.setOnShowListener(v->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(b->{try{int x=Integer.parseInt(width.getText().toString()),y=Integer.parseInt(height.getText().toString());if(x<64||x>1024||y<64||y>1024)throw new NumberFormatException();p.edit().putBoolean("customDisplay",true).putInt("width",x).putInt("height",y).putBoolean("full",full.isChecked()).apply();dialog.dismiss();restartWithSettings(game);}catch(NumberFormatException e){Toast.makeText(this,"가로·세로에 64~1024 사이의 값을 입력하세요",Toast.LENGTH_LONG).show();}}));dialog.show();
  }
- private void restartWithSettings(File game){releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();runOnUiThread(()->{starting=false;launchPrepared(game);});});}
+ private void restartWithSettings(File game){releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();postIfAlive(()->{starting=false;launchPrepared(game);});});}
  private void showGame(){
   setRequestedOrientation(BuildConfig.THOR?ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);setupRoot();
   keypadButtons.clear();languageKey=null;
@@ -413,11 +415,19 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   }finally{connection.disconnect();}
  }
  private static String userNotice(String text){
+  if(text==null)return "알 수 없는 오류입니다. 오류 보고서를 보내 주세요.";
   switch(text){
    case "Quick Save created on this device (experimental).":return "현재 상태를 빠른 저장했습니다. (실험 기능)";
    case "Quick Load complete. No undo was created for the stopped/expired session.":return "불러왔습니다. 중단되거나 만료된 세션이므로 불러오기 전으로 복구할 수 없습니다.";
    case "Quick Load complete. Active audio restarts from its beginning.":return "불러왔습니다. 재생 중이던 소리는 처음부터 다시 재생됩니다.";
    case "Cannot save a stopped game; Quick Load remains available":return "중단된 게임은 저장할 수 없습니다. 빠른 불러오기는 사용할 수 있습니다.";
+   case "No checkpoint in this slot":return "이 슬롯에는 빠른 저장이 없습니다. 저장된 슬롯을 선택하세요.";
+   case "Checkpoint needs the APK build that created it":
+   case "Checkpoint needs the APK version that created it":return "이 빠른 저장은 만든 앱 버전에서만 불러올 수 있습니다. 게임 안에서 저장한 진행 상황은 그대로 유지됩니다. 현재 버전에서는 게임 안의 이어하기를 이용하세요.";
+   case "Checkpoint belongs to a different game":return "다른 게임 파일의 빠른 저장입니다. 현재 진행 상황은 유지됩니다.";
+   case "Checkpoint display mismatch; current session retained":
+   case "Checkpoint save-data mismatch; current session retained":
+   case "Checkpoint replay diverged; current session retained":return "저장한 상태를 정확히 재현하지 못해 불러오기를 취소했습니다. 현재 진행 상황은 유지됩니다.";
    case "Game stopped; Quick Load available":return "게임 중단 · 빠른 불러오기 가능";
    case "Stopped":return "중단됨";
    default:return text;
@@ -449,8 +459,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    if(!action.equals("save"))audio.stopAll();
    io.execute(()->{
     String notice;
-    try{notice=NativeBridge.checkpoint((action.equals("save")||action.equals("load"))?action+":"+slot:action);}catch(Exception error){notice="빠른 저장·불러오기를 사용할 수 없습니다: "+error.getMessage();}
-    String result=userNotice(notice);runOnUiThread(()->{checkpointBusy=false;koreanKeypad=NativeBridge.isKoreanInput();updateKeypadLabels();Toast.makeText(this,result,Toast.LENGTH_LONG).show();});
+    try{notice=NativeBridge.checkpoint((action.equals("save")||action.equals("load"))?action+":"+slot:action);}catch(Exception error){notice="빠른 저장·불러오기를 사용할 수 없습니다: "+userNotice(error.getMessage());}
+    String result=userNotice(notice);postIfAlive(()->{checkpointBusy=false;koreanKeypad=NativeBridge.isKoreanInput();updateKeypadLabels();Toast.makeText(this,result,Toast.LENGTH_LONG).show();});
    });
    return;
   }
@@ -468,7 +478,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     }
     message=result.optString("error",result.optString("message","완료했습니다."));
    }catch(Exception error){message="빠른 저장·불러오기를 사용할 수 없습니다: "+error.getMessage();}
-   String notice=userNotice(message);runOnUiThread(()->{checkpointBusy=false;Toast.makeText(this,notice,Toast.LENGTH_LONG).show();});
+   String notice=userNotice(message);postIfAlive(()->{checkpointBusy=false;Toast.makeText(this,notice,Toast.LENGTH_LONG).show();});
   });
  }
  private void key(String code,boolean down){key(code,down,0,System.nanoTime());}
@@ -487,14 +497,14 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
   }
  }
  private void releaseKeys(){controller.release();for(String k:new ArrayList<>(held))key(k,false);}
- private void leaveGame(){if(starting||checkpointBusy)return;releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();runOnUiThread(()->{starting=false;showLibrary();});});}
+ private void leaveGame(){if(starting||checkpointBusy)return;releaseKeys();audio.stopAll();starting=true;io.execute(()->{NativeBridge.stop();postIfAlive(()->{starting=false;showLibrary();});});}
  // API 33+ uses the registered platform callback; keep this for Android 8–12.
  @android.annotation.SuppressLint("GestureBackNavigation")
  @Override public void onBackPressed(){handleBack();}
  private void handleBack(){if(activeGame!=null)leaveGame();else finish();}
  @Override protected void onResume(){super.onResume();foreground=true;NativeBridge.pause(false);audio.pause(false);Choreographer.getInstance().postFrameCallback(this);}
  @Override protected void onPause(){foreground=false;releaseKeys();NativeBridge.pause(true);audio.pause(true);Choreographer.getInstance().removeFrameCallback(this);super.onPause();}
- @Override protected void onDestroy(){if(BuildConfig.THOR)((android.hardware.input.InputManager)getSystemService(INPUT_SERVICE)).unregisterInputDeviceListener(controllerListener);io.execute(NativeBridge::stop);io.shutdown();audio.close();super.onDestroy();}
+ @Override protected void onDestroy(){if(BuildConfig.THOR)((android.hardware.input.InputManager)getSystemService(INPUT_SERVICE)).unregisterInputDeviceListener(controllerListener);io.execute(NativeBridge::stop);audio.close();super.onDestroy();}
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);releaseKeys();if(activeGame!=null){Bitmap old=gameView==null?null:gameView.bitmap;showGame();gameView.bitmap=old;}else showLibrary();}
  @Override public void doFrame(long nanos){if(!foreground)return;if(tracing)NativeBridge.tracePoint(20,nanos,System.nanoTime());if(activeGame!=null&&!starting&&!checkpointBusy){long shape=pickupFrame(nanos);if(shape!=0){int w=(int)(shape>>>32),h=(int)shape;if(gameView.bitmap==null||gameView.bitmap.getWidth()!=w||gameView.bitmap.getHeight()!=h)gameView.bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);if(tracing)NativeBridge.tracePoint(31,frameMetadata[0],0);gameView.bitmap.setPixels(pixels,0,w,0,0,w,h);gameView.paintId=frameMetadata[0];if(tracing)NativeBridge.tracePoint(21,gameView.paintId,0);gameView.invalidate();}
    for(int i=0;i<8;i++){byte[] packet=NativeBridge.audio();if(packet==null)break;audio.submit(packet);}
@@ -518,7 +528,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/zip");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"GOmul-rescue-"+System.currentTimeMillis()+".zip");
     try{startActivityForResult(intent,4);}catch(Exception e){ready.delete();rescueExport=null;rescueBusy=false;rescueError(e);}
    });
-  }catch(Exception e){if(prepared!=null)prepared.delete();runOnUiThread(()->{rescueBusy=false;rescueError(e);});}});
+  }catch(Exception e){if(prepared!=null)prepared.delete();postIfAlive(()->{rescueBusy=false;rescueError(e);});}});
  }
  private void rescueError(Exception e){Log.e("WIE-Native","Rescue export failed",e);new AlertDialog.Builder(this).setTitle("오류 보고서를 만들 수 없습니다").setMessage(e.getMessage()).setPositiveButton("확인",null).show();}
  private void showRescue(String failure){

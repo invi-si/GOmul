@@ -1,18 +1,24 @@
-# Standalone Android checkpoints (experimental)
+# Android 빠른 저장·불러오기
 
-Quick Save and Quick Load are beside CALL. Hold Quick Load to undo the last successful load. Each imported archive has its own Quick Save and recovery slot, stored in app-private storage. Slots survive closing the app; uninstalling or clearing app data deletes them. No game files or starter saves are bundled.
+게임 화면 상단의 **저장 / 불러오기**에서 게임별 슬롯 1~3을 선택합니다. 불러오기 버튼을 길게 누르면 마지막 불러오기 전 상태로 복구합니다. 슬롯 1은 기존 `quick` 디렉터리를 계속 사용합니다. 게임 파일의 식별값별로 저장을 분리하며 앱을 종료해도 유지됩니다. 앱 삭제·데이터 초기화는 저장을 지웁니다.
 
-On physical Android, these are **replay checkpoints, not instant memory snapshots**. Starting a game records external inputs, clock samples, redraw-consumption boundaries, and the observed guest task order. Quick Save stores this journal and the session's initial persistent data. Quick Load reconstructs a separate runtime while the current runtime is suspended. It compares the resulting display and persistent data before replacing the current session. Replay failures restore the original persistent data and leave the current runtime available. An interrupted load is rolled back at the next game launch.
+## 일반 저장과의 차이
 
-Important limits:
+빠른 저장은 RAM 스냅샷이 아닌 **결정론적 재실행 체크포인트**입니다. 입력, 시계 값, 화면 소비 경계, 작업 순서를 기록하고 불러올 때 별도 실행 환경에서 재구성합니다. 화면과 일반 저장 파일이 일치한 경우에만 현재 세션을 교체합니다.
 
-- Loading takes longer for longer sessions; reconstruction currently has a three-minute limit.
-- Recording uses at most 64 MiB of journal memory, plus game-data copies. Reaching the limit disables new checkpoints for that session. Earlier checkpoints remain on disk.
-- Active audio restarts from the beginning after loading. Audio playback position is not captured.
-- Checkpoints are local and tied to the game archive and APK build. They are not compatible with Mac AVD snapshots.
-- Display and file equality do **not** prove all hidden CPU/JVM state is identical. The user confirmed Quick Save and Quick Load work in the Android virtual device using the standalone APK path, without the Mac helper. Automated correctness tests and physical-phone checkpoint validation have not been performed; this is not a claim of universal save-state support.
-- Recording adds overhead. Its performance impact has not been measured.
+- 일반 게임 저장은 앱 업데이트 시 보존됩니다. 빠른 저장은 만든 APK 빌드와 게임 파일이 같아야 불러올 수 있습니다.
+- 업데이트 전에 가능하면 게임 안에서도 저장하세요. 이전 빠른 저장 파일은 자동 삭제하지 않지만 다른 빌드에서는 거부되며 앱에서 한국어로 안내합니다.
+- 재구성 실패 시 기존 세션과 일반 저장으로 돌아갑니다. 불러오기 도중 앱이 종료되면 다음 게임 실행에서 보관한 일반 저장으로 되돌립니다.
+- 1~3 슬롯과 불러오기 복구 슬롯은 별개입니다. 동봉 초기 데이터 가져오기도 빠른 저장과 별개입니다.
 
-The Mac helper still uses its existing whole-AVD snapshots when configured. It retains its existing protected-startup behavior. Importing companion game data remains automatic and independent of Quick Save/Load.
+## 한계
 
-Validation: the APK compiled successfully, and the user manually confirmed Quick Save/Load in the Android virtual device. The assistant did not run automated tests or inspect gameplay, as requested.
+- 긴 세션은 불러오기에 시간이 걸립니다. 재구성 제한은 3분입니다.
+- 기록 한도는 64 MiB입니다. 한도 도달 후 새 체크포인트 저장은 중단되며 이전 슬롯은 남습니다.
+- 소리는 불러온 뒤 시작 위치부터 다시 재생합니다. 재생 위치 자체를 보존하지 않습니다.
+- 화면·파일 비교만으로 숨겨진 모든 CPU/JVM 상태의 동일성을 증명하지는 않습니다. 모든 게임에서 성공한다고 보장하지 않습니다.
+- Mac의 전체 AVD 스냅샷 도우미와는 다른 형식입니다. 별도로 설정한 도우미는 기존 방식대로 동작합니다.
+
+Android가 게임을 일시 정지하거나 저장/재구성 작업을 하는 동안에는 그 시간이 게스트 시계에 누적되지 않습니다. 실행 중의 타이머 취소, CPU 스케줄링, 화면 갱신 정책은 이 변경으로 조정하지 않습니다.
+
+현재 검증 범위와 실제 APK 검사 결과는 [Android 안정성 점검](android-reliability-20260923.md)에 기록합니다.

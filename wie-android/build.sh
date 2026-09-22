@@ -1,6 +1,18 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+variant=${1:-debug}
+case "$variant" in
+  debug) task=assembleDebug ;;
+  release)
+    task=assembleRelease
+    : "${GOMUL_KEYSTORE:?Set GOMUL_KEYSTORE to the existing app signing keystore}"
+    : "${GOMUL_KEYSTORE_PASSWORD:?Set GOMUL_KEYSTORE_PASSWORD}"
+    : "${GOMUL_KEY_ALIAS:?Set GOMUL_KEY_ALIAS}"
+    : "${GOMUL_KEY_PASSWORD:?Set GOMUL_KEY_PASSWORD}"
+    ;;
+  *) echo "Usage: $0 [debug|release]" >&2; exit 1 ;;
+esac
 : "${ANDROID_HOME:?Set ANDROID_HOME}"
 : "${NDK_HOME:?Set NDK_HOME}"
 case "$(uname -s)" in
@@ -39,4 +51,4 @@ if [ "${GOMUL_THOR:-0}" = 1 ]; then
 else
     set --
 fi
-"$root/wie-android/android/gradlew" -p "$root/wie-android/android" "$@" :app:assembleDebug
+"$root/wie-android/android/gradlew" -p "$root/wie-android/android" "$@" ":app:$task"

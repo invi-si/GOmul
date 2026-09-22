@@ -1,8 +1,9 @@
 # Android per-game settings
 
 The top Settings button offers the existing Quick Save/Quick Load operations,
-display dimensions, and game-clock speed. Preferences are keyed by imported
-archive identity, matching the save isolation used by the library.
+display dimensions, and game-clock speed. Display preferences are keyed by imported archive identity, matching the save
+isolation used by the library. Speed is shared across games and persists across
+app restarts.
 
 Display overrides accept 64–1024 pixels per axis and require restart. Auto
 removes the override. LGT additionally supports disabling the annunciator crop
@@ -13,7 +14,7 @@ before framebuffers are allocated. Existing checkpoints made with other display
 settings may fail deterministic reconstruction and should be replaced after
 changing settings.
 
-Speed runs from 0.25× to 2× in 0.25× steps, default 1×. It changes the live guest
+Speed runs from 0.25× to 3× in 0.25× steps, default 1×; above 2× is experimental. It changes the live guest
 clock while keeping its value continuous at speed changes. Recorded replay clocks
 remain authoritative, and changing speed adds no replay events. Speed is
 reapplied after launch and successful Quick Load.
@@ -38,7 +39,7 @@ guarantee of twice the movement or simulation speed on every game. Host worker
 polling remains unchanged: shorter and zero-wait experiments showed no useful
 gain in the isolated title-sequence check and were removed.
 
-Validation: 19 Android and 52 backend Rust tests pass. Android tests cover clock scaling, replay independence, exact
+Historical validation (see [current Android checks](android-reliability-20260923.md) for the latest results): 19 Android and 52 backend Rust tests passed. Android tests cover clock scaling, replay independence, exact
 checkpoint pixels for eager/deferred conversion, unsupported-format fallback,
 latest-frame retention, resize, and switching back to 1×. The Android audio timing
 harness checks 0.25–2× deadline conversion. Settings menu and display dialog were
