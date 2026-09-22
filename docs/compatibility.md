@@ -26,4 +26,4 @@ GOmul은 KTF·LGT·SKT의 일부 게임을 실행합니다. **같은 게임 제�
 
 ## 세부 기록
 
-[최근 오류 보고](android-reported-game-issues-20260913.md), [Android 수동 확인 목록](android-compatible-library-20260912.md), [LGT 분류](lgt-compatibility-20260912.md), [과거 판정 전체](compatibility-history.md)를 함께 확인하세요. 날짜가 오래된 통과 표시는 이후 실패 보고를 덮어쓰지 않습니다.
+[2026-09-23 Android 3× 단기 검사](android-compatibility-smoke-20260923.md), [최근 오류 보고](android-reported-game-issues-20260913.md), [Android 수동 확인 목록](android-compatible-library-20260912.md), [LGT 분류](lgt-compatibility-20260912.md), [과거 판정 전체](compatibility-history.md)를 함께 확인하세요. 날짜가 오래된 통과 표시는 이후 실패 보고를 덮어쓰지 않습니다.

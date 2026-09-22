@@ -1,16 +1,20 @@
 # Compatibility observations
 
-Latest user exclusions and reported failures override older pass labels: [2026-09-13 follow-up](android-reported-game-issues-20260913.md).
+Latest user exclusions and reported failures override older pass labels: [2026-09-13 follow-up](android-reported-game-issues-20260913.md). The [2026-09-23 Android 3× smoke test](android-compatibility-smoke-20260923.md) is a later, bounded observation; it is not a full-play or 1× compatibility decision.
 
-## Current LGT classification — 2026-09-12
+## 놈3 carrier preference correction — 2026-09-23
+
+The short Android 3× comparison favors **KTF 놈3** for the tested archives: KTF reached settings, while LGT stayed mostly white and showed suspected lack of progression. This supersedes the 2026-09-12 blanket “use LGT” preference **for this title under the tested conditions**. It does not establish a universal LGT failure or change any other carrier preference. The older LGT success label and preference table below remain a dated record, not the current 3× recommendation.
+
+## LGT classification recorded on 2026-09-12
 
 At the user's request, LGT titles outside the existing LGT incompatible list are classified as **구동 성공 / 호환**. The [catalog inventory](lgt-compatibility-20260912.md) records **54 compatible and 19 incompatible titles**. Existing incompatible entries remain excluded, including 하이브리드 pending recheck; 하이브리드2 is a separate compatible title. This records the user's classification, not a new automated test run.
 
-## Current Android library — 2026-09-12
+## Android library snapshot — 2026-09-12
 
-The user completed manual checking and classified all **124 game archives currently visible in the Android library** as **구동 성공 / 호환 (runs successfully / compatible)**. See the [exact installed-file inventory](android-compatible-library-20260912.md). This is the current user-confirmed classification for those packages; older observations below remain historical. Games absent from that inventory retain their previous classification. Dragon Road uses its in-game Speed 5 setting.
+The user completed manual checking and classified all **124 game archives visible in the Android library on 2026-09-12** as **구동 성공 / 호환 (runs successfully / compatible)**. See the [exact installed-file inventory](android-compatible-library-20260912.md). This is a historical snapshot of the user-confirmed classification for those packages, not the current installed-file count or a 2026-09-23 retest. Games absent from that inventory retain their previous classification. Dragon Road uses its in-game Speed 5 setting.
 
-Current package-specific classifications are linked above. The dated notes below preserve earlier findings and decisions; they do not override subsequent user confirmations for the same package. Super Action Hero setup still depends on matching accompanying data and emulated identity. Different NOM 3 carrier builds must be treated separately.
+The dated package-specific classifications are linked above. The notes below preserve earlier findings and decisions; they do not override subsequent user confirmations for the same package. Super Action Hero setup still depends on matching accompanying data and emulated identity. Different NOM 3 carrier builds must be treated separately.
 
 The optimized CPU path falls back to the interpreter on unsupported instructions or boundaries. No universal frame-rate promise is made. Native Android supports experimental replay-based Quick Save/Load; the optional Mac-hosted AVD helper instead uses device snapshots. See [checkpoint limits](android-checkpoints.md).
 

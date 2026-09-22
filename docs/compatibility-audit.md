@@ -121,9 +121,9 @@ warning/error evidence. This build is not a performance benchmark.
 installed archives, runs each in a fresh process with disposable saves, retains
 per-case results, and retries high-priority suspects once with a longer startup
 wait and alternative inputs. Per-game timeouts keep one hang from blocking the
-batch. Already incompatible, overridden and user-deprioritized packages are
-excluded when generating the plan. The runner restores an explicitly supplied
-normal APK at completion or interruption and records restoration failures.
+batch. The plan explicitly selects archives; historical exclusions are not
+applied automatically. The runner restores an explicitly supplied normal APK
+at completion or interruption and records restoration failures.
 
 Three settled samples with at least 98% near-black or near-white pixels are
 high-priority suspects even if paints increase. Missing framebuffers and
@@ -145,8 +145,36 @@ are normalized to L/R; unknown names now fail instead of silently doing nothing.
 Earlier captures containing RSOFT did not exercise the native right soft key.
 Preserve their recorded sequence and use a new directory for revised probes.
 
-For the diagnostic RescueInstrumentation fresh-start/continuation path, keys
-may also contain WAIT:milliseconds (0–30000 per step). These are host-side waits
-between inputs, not changes to guest timers or scheduling. The boot CLI's keys
-remain button-only. Use explicit waits to navigate documented first-run setup
-without racing logos or dialogs, and retain the complete sequence with evidence.
+For diagnostic boot and RescueInstrumentation paths, keys may also contain
+`WAIT:milliseconds` (0–30000 per step). These are host-side waits between
+inputs, not changes to guest timers or scheduling. Use explicit waits to
+navigate documented first-run setup without racing logos or dialogs, and
+retain the complete sequence with evidence.
+
+For a 3× survey, pass `--speed 3000` to `audit.py` or `overnight.py`. The
+diagnostic runner applies this setting immediately after every game start,
+before its first sampled wait; each result records the requested speed. The
+asynchronous worker could execute a very short prefix before that queued speed
+command is processed. A busy host also may not achieve 3× real-time throughput. Pass
+`--capture-rescue` to retain `manual-rescue.tar` and the exact disposable
+`isolated-save.tar` for each case, alongside its SHA-256 in `result.json`. An
+automatic `rescue.tar` may also exist for a native failure. Validate the
+archive ID, build ID, frame, trace and saved files before using a capture as
+a debugging handoff. Keep these game-derived artifacts and the matching
+diagnostic APK outside the public repository. Completed cases are reused only
+with identical probe options; an incomplete case or changed options require a
+new output directory so old Rescue files cannot be mistaken for new evidence.
+
+For a focused crash investigation, `--capture-boot-rescue` polls for a manual
+Rescue for up to about one second immediately after asynchronous game start.
+It keeps the first successful capture in a separate `boot-rescue.tar` and writes
+`boot-rescue.json` even if the test process later dies before `result.json`.
+The driver also exports the isolated cache save on that failure path. This is a
+**pre-crash recording prefix**, not an exact crash-state RAM snapshot; a very
+early hard crash may occur before any recording can be captured. The first
+successful boot capture can have an empty trace, so verify trace length before
+using it for replay. This option is off for ordinary sweeps and does not change
+production timing or user saves.
+A game's full-process exit/relaunch behavior must be tested with separate
+Android process starts; stopping and restarting only the native session inside
+one instrumentation process would not reproduce it.

@@ -10,6 +10,8 @@ import java.nio.file.Files;
 
 /** Bounded smoke sequences. Only app-cache saves are used; no gameplay-pass claim. */
 public final class CompatibilityInstrumentation {
+ private static int runSpeed;
+ private static void start(String game,String savePath){NativeBridge.start(game,savePath);NativeBridge.speed(runSpeed);}
  private static void step(String key,int holdMs)throws Exception {
   if(key.startsWith("WAIT:")){
    int delay=Integer.parseInt(key.substring(5));
@@ -17,7 +19,7 @@ public final class CompatibilityInstrumentation {
    Thread.sleep(delay);
   }else if(key.startsWith("SPEED:")){
    int speed=Integer.parseInt(key.substring(6));
-   if(speed<250||speed>2000)throw new IllegalArgumentException("Speed must be 250–2000");
+   if(speed<250||speed>3000)throw new IllegalArgumentException("Speed must be 250–3000");
    NativeBridge.speed(speed);
   }else{
    String[] chord=key.split("\\+");
@@ -26,6 +28,32 @@ public final class CompatibilityInstrumentation {
    for(String button:chord)NativeBridge.key(button,false,0,0,0);
    Thread.sleep(400);
   }
+ }
+ private static void captureBootRescue(File root)throws Exception {
+  long started=SystemClock.elapsedRealtime(),deadline=started+1000;
+  JSONObject evidence=new JSONObject().put("phase","after-async-start").put("startedElapsedMs",started);
+  int attempts=0;
+  while(true){
+   attempts++;
+   try{
+    String source=NativeBridge.manualRescue();
+    File destination=new File(root,"boot-rescue");
+    Files.move(new File(source).toPath(),destination.toPath());
+    evidence.put("rescuePath",destination.getAbsolutePath());
+    evidence.remove("captureError");
+    break;
+   }catch(IllegalStateException busy){
+    evidence.put("captureError",busy.toString());
+   }catch(Exception error){
+    evidence.put("captureError",error.toString());
+    break;
+   }
+   long remaining=deadline-SystemClock.elapsedRealtime();
+   if(remaining<=0)break;
+   Thread.sleep(Math.min(25,remaining));
+  }
+  evidence.put("attempts",attempts).put("finishedElapsedMs",SystemClock.elapsedRealtime());
+  Files.write(new File(root,"boot-rescue.json").toPath(),evidence.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
  }
  private static int sampleNumber,frameWidth,frameHeight,audioNumber;
  private static boolean collectAudio;
@@ -75,11 +103,13 @@ public final class CompatibilityInstrumentation {
    sampleNumber=frameWidth=frameHeight=0;framePixels=new int[1024*1024];
    Files.write(new File(root,"process-id").toPath(),Integer.toString(android.os.Process.myPid()).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
    File save=new File(root,"saves/case");save.mkdirs();
+   runSpeed=Integer.parseInt(arguments.getString("speed","1000"));
+   if(runSpeed<250||runSpeed>3000)throw new IllegalArgumentException("Speed must be 250–3000");
    if(arguments.containsKey("initialSave"))copySave(new File(arguments.getString("initialSave")).toPath(),save);
    JSONArray samples=new JSONArray();
    if(arguments.containsKey("lifecycleRounds")){
     for(int round=0;round<Integer.parseInt(arguments.getString("lifecycleRounds"));round++){
-     NativeBridge.start(arguments.getString("game"),save.getAbsolutePath());Thread.sleep(2500);
+     start(arguments.getString("game"),save.getAbsolutePath());Thread.sleep(2500);
      int checkpointRounds=Integer.parseInt(arguments.getString("checkpointRounds","0"));
      if(checkpointRounds>0){NativeBridge.pause(true);NativeBridge.checkpoint("save");for(int i=0;i<checkpointRounds;i++)NativeBridge.checkpoint("load");}
      String running=NativeBridge.status();long paints=NativeBridge.paints();NativeBridge.stop();
@@ -90,7 +120,10 @@ public final class CompatibilityInstrumentation {
     }
     result.putString("stream",samples.toString()+"\n");instrumentation.finish(0,result);return;
    }
-   NativeBridge.start(arguments.getString("initialGame",arguments.getString("game")),save.getAbsolutePath());
+   start(arguments.getString("initialGame",arguments.getString("game")),save.getAbsolutePath());
+   // Opt-in pre-crash evidence: poll until the async session recording exists.
+   // It is a prefix capture, not the state at a later native crash.
+   if("true".equals(arguments.getString("captureBootRescue")))captureBootRescue(root);
    int bootSamples=Integer.parseInt(arguments.getString("bootSamples","1"));
    for(int i=0;i<bootSamples;i++){Thread.sleep(5000);samples.put(sample(root,"boot:"+i));}
    // Reproduce documented phone installs that copy companion data after first boot.
@@ -102,7 +135,7 @@ public final class CompatibilityInstrumentation {
     NativeBridge.stop();
     java.nio.file.Path staged=new File(arguments.getString("stagedData")).toPath();
     copySave(staged,save);
-    NativeBridge.start(arguments.getString("game"),save.getAbsolutePath());
+    start(arguments.getString("game"),save.getAbsolutePath());
     Thread.sleep(5000);samples.put(sample(root,"reopened-after-data-install"));
    }
    if("true".equals(arguments.getString("restartAfterStop"))){
@@ -111,7 +144,7 @@ public final class CompatibilityInstrumentation {
      NativeBridge.stop();
      File firstLog=new File(save.getParentFile(),"case.frames.log");
      if(firstLog.isFile())Files.copy(firstLog.toPath(),new File(root,"first-start.frames.log").toPath());
-     NativeBridge.start(arguments.getString("game"),save.getAbsolutePath());
+     start(arguments.getString("game"),save.getAbsolutePath());
      Thread.sleep(5000);samples.put(sample(root,"restarted-with-same-save"));
     }
    }
@@ -132,7 +165,7 @@ public final class CompatibilityInstrumentation {
    for(int i=0;i<3;i++){Thread.sleep(2000);samples.put(sample(root,"settled:"+i));}
    // Some games ask for confirmation before their first-run initialization exit.
    if("true".equals(arguments.getString("restartAfterStop"))&&NativeBridge.status().startsWith("Game stopped")){
-    NativeBridge.stop();NativeBridge.start(arguments.getString("game"),save.getAbsolutePath());
+    NativeBridge.stop();start(arguments.getString("game"),save.getAbsolutePath());
     Thread.sleep(5000);samples.put(sample(root,"reopened-after-input-exit"));
     for(String key:arguments.getString("reopenedKeys",arguments.getString("keys","OK,DOWN,OK,1")).split(",")){
      if(key.isEmpty())continue;if(NativeBridge.status().startsWith("Error:"))break;
@@ -142,7 +175,7 @@ public final class CompatibilityInstrumentation {
     for(int i=0;i<3;i++){Thread.sleep(2000);samples.put(sample(root,"settled:"+i));}
    }
    NativeBridge.pause(true);
-   JSONObject report=new JSONObject().put("pid",android.os.Process.myPid()).put("samples",samples);
+   JSONObject report=new JSONObject().put("pid",android.os.Process.myPid()).put("speed",runSpeed).put("samples",samples);
    // Persist measurement evidence even if optional rescue capture is unavailable.
    Files.write(new File(root,"result.json").toPath(),report.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
    if("true".equals(arguments.getString("captureRescue"))){

@@ -46,14 +46,17 @@ def report(root, results, state):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--plan',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--serial',required=True);p.add_argument('--restore-apk',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--plan',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--serial',required=True);p.add_argument('--restore-apk',required=True);p.add_argument('--speed',type=int,choices=range(250,3001,250),default=1000);a=p.parse_args()
     root=a.output;root.mkdir(parents=True,exist_ok=True);plan=json.loads(a.plan.read_text());results=[]
     audit=pathlib.Path(__file__).with_name('audit.py');package='local.wie.nativeapp'
     def run_case(item,stage,boot_samples,keys):
         folder=root/stage;case=folder/item['id'];case.mkdir(parents=True,exist_ok=True)
         target=case/'result.json'
-        if target.exists(): return json.loads(target.read_text())
-        command=[sys.executable,str(audit),'--serial',a.serial,'--output',str(folder),'--phase','boot','--game-id',item['id'],'--boot-samples',str(boot_samples),'--keys',keys,'--restart-after-stop','--capture-rescue']
+        if target.exists():
+            cached=json.loads(target.read_text())
+            if cached.get('speed')!=a.speed or cached.get('keys')!=keys or cached.get('boot_samples')!=boot_samples:raise RuntimeError('Cached case used different test options')
+            return cached
+        command=[sys.executable,str(audit),'--serial',a.serial,'--output',str(folder),'--phase','boot','--game-id',item['id'],'--boot-samples',str(boot_samples),'--keys',keys,'--speed',str(a.speed),'--restart-after-stop','--capture-rescue']
         try:
             with (case/'driver.log').open('w') as log:
                 completed=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,timeout=150)
@@ -61,7 +64,7 @@ def main():
             return json.loads(target.read_text())
         except (subprocess.TimeoutExpired, RuntimeError) as e:
             subprocess.run(['adb','-s',a.serial,'shell','am','force-stop',package],timeout=20,check=False)
-            failure={'game':item['game'],'classification':'harness-or-process-failure','error':str(e)}
+            failure={'game':item['game'],'keys':keys,'speed':a.speed,'boot_samples':boot_samples,'classification':'harness-or-process-failure','error':str(e)}
             target.write_text(json.dumps(failure,indent=2));return failure
     state='running'
     try:

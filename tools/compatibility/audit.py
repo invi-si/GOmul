@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import struct
+import tarfile
 import zipfile
 
 PACKAGE = 'local.wie.nativeapp'
@@ -21,7 +22,18 @@ def parse_keys(value):
     aliases = {'LSOFT': 'L', 'RSOFT': 'R'}
     supported = {'UP', 'DOWN', 'LEFT', 'RIGHT', 'OK', 'L', 'R', 'CLR', 'CALL', '*', '#', *'0123456789'}
     keys = [aliases.get(key.strip().upper(), key.strip().upper()) for key in value.split(',')]
-    unknown = [key for key in keys if key not in supported]
+    unknown = []
+    for key in keys:
+        if key in supported:
+            continue
+        if key.startswith('WAIT:'):
+            try:
+                delay = int(key[5:])
+            except ValueError:
+                delay = -1
+            if 0 <= delay <= 30000:
+                continue
+        unknown.append(key)
     if unknown:
         raise argparse.ArgumentTypeError('Unsupported native input key: ' + repr(unknown))
     return ','.join(keys)
@@ -144,12 +156,38 @@ def scan_archive(data, abi, origin='', depth=0, supported=None):
     return result
 
 
+def pull_boot_rescue(case, private, adb):
+    """Recover opt-in pre-crash evidence even without instrumentation result.json."""
+    evidence = {}
+    marker = 'cache/compatibility-audit/boot-rescue.json'
+    tree = 'cache/compatibility-audit/boot-rescue'
+    try:
+        if private('sh', '-c', 'test -f ' + marker + ' && echo yes || true').strip() == 'yes':
+            contents = private('cat', marker)
+            (case / 'boot-rescue.json').write_text(contents)
+            evidence['boot_rescue_metadata'] = json.loads(contents)
+    except (subprocess.SubprocessError, ValueError) as error:
+        evidence['boot_rescue_metadata_error'] = str(error)
+    try:
+        if private('sh', '-c', 'test -d ' + tree + ' && echo yes || true').strip() == 'yes':
+            data = adb('exec-out', shlex.join(['run-as', PACKAGE, 'tar', '-cf', '-', '-C', tree, '.']), binary=True)
+            with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+                archive.getmembers()
+            (case / 'boot-rescue.tar').write_bytes(data)
+            evidence['boot_rescue_sha256'] = hashlib.sha256(data).hexdigest()
+    except (subprocess.SubprocessError, tarfile.TarError, ValueError) as error:
+        evidence['boot_rescue_capture_error'] = str(error)
+    return evidence
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
     parser.add_argument('--output', type=pathlib.Path, required=True)
     parser.add_argument('--boot-samples', type=int, default=1)
+    parser.add_argument('--speed', type=int, choices=range(250, 3001, 250), default=1000, help='Guest clock rate in thousandths')
     parser.add_argument('--capture-rescue', action='store_true')
+    parser.add_argument('--capture-boot-rescue', action='store_true', help='Capture pre-crash Rescue within one second of async game start')
     parser.add_argument('--game-id', help='Restrict to one installed archive ID for focused regression reruns')
     parser.add_argument('--restart-after-stop', action='store_true', help='Probe a second launch using the same disposable save after an intentional stop')
     parser.add_argument('--keys', type=parse_keys, default='OK,DOWN,OK,1', help='Comma-separated boot-probe input sequence')
@@ -197,15 +235,23 @@ def main():
             previous = case / 'result.json'
             if previous.exists():
                 saved = json.loads(previous.read_text())
-                if saved.get('log_capture_verified'):
+                if (saved.get('log_capture_verified') and saved.get('speed') == args.speed
+                        and saved.get('keys') == args.keys and saved.get('boot_samples') == args.boot_samples
+                        and saved.get('capture_rescue', False) == args.capture_rescue
+                        and saved.get('capture_boot_rescue', False) == args.capture_boot_rescue
+                        and saved.get('restart_after_stop', False) == args.restart_after_stop):
                     results.append(saved)
                     continue
+                raise RuntimeError(f'Existing case has incomplete or different options: {case}; use a new output directory')
+            if any(item.name != 'driver.log' for item in case.iterdir()):
+                raise RuntimeError(f'Existing case has artifacts but no result: {case}; use a new output directory')
             # Separate target process and isolated cache saves on every run.
             shell('am', 'force-stop', PACKAGE)
             private('rm', '-rf', 'cache/compatibility-audit')
             output = ''
             try:
-                output = shell('am', 'instrument', '-w', '-r', '-e', 'mode', 'compatibility', '-e', 'game', device_root + game, '-e', 'keys', args.keys, '-e', 'bootSamples', str(args.boot_samples), '-e', 'captureRescue', str(args.capture_rescue).lower(), '-e', 'restartAfterStop', str(args.restart_after_stop).lower(), RUNNER, timeout=max(60, 35 + 5 * args.boot_samples + len(args.keys.split(','))))
+                wait_seconds = sum(int(key[5:]) / 1000 for key in args.keys.split(',') if key.startswith('WAIT:'))
+                output = shell('am', 'instrument', '-w', '-r', '-e', 'mode', 'compatibility', '-e', 'game', device_root + game, '-e', 'keys', args.keys, '-e', 'speed', str(args.speed), '-e', 'bootSamples', str(args.boot_samples), '-e', 'captureRescue', str(args.capture_rescue).lower(), '-e', 'captureBootRescue', str(args.capture_boot_rescue).lower(), '-e', 'restartAfterStop', str(args.restart_after_stop).lower(), RUNNER, timeout=max(60, 35 + 5 * args.boot_samples + len(args.keys.split(',')) + wait_seconds))
                 (case / 'instrumentation.txt').write_text(output)
                 if private('sh', '-c', 'test -f cache/compatibility-audit/boot.png && echo yes || true').strip() == 'yes':
                     (case / 'boot.png').write_bytes(adb('exec-out', shlex.join(['run-as', PACKAGE, 'cat', 'cache/compatibility-audit/boot.png']), binary=True))
@@ -230,9 +276,9 @@ def main():
                 if args.capture_rescue and private('sh', '-c', 'test -d ' + manual + ' && echo yes || true').strip() == 'yes':
                     (case / 'manual-rescue.tar').write_bytes(adb('exec-out', shlex.join(['run-as', PACKAGE, 'tar', '-cf', '-', '-C', manual, '.']), binary=True))
                 errors = [line for line in (logs + '\n' + native).splitlines() if ERROR.search(line)]
-                report.update(game=game, keys=args.keys, errors=errors, log_capture_verified=True, classification=classify(report['samples'], errors))
+                report.update(game=game, keys=args.keys, speed=args.speed, boot_samples=args.boot_samples, capture_rescue=args.capture_rescue, capture_boot_rescue=args.capture_boot_rescue, restart_after_stop=args.restart_after_stop, errors=errors, log_capture_verified=True, classification=classify(report['samples'], errors))
             except (subprocess.SubprocessError, ValueError, RuntimeError) as error:
-                report = {'game': game, 'classification': 'harness-or-process-failure', 'error': str(error)}
+                report = {'game': game, 'keys': args.keys, 'speed': args.speed, 'boot_samples': args.boot_samples, 'capture_rescue': args.capture_rescue, 'capture_boot_rescue': args.capture_boot_rescue, 'restart_after_stop': args.restart_after_stop, 'classification': 'harness-or-process-failure', 'error': str(error)}
                 try:
                     pid = private('cat', 'cache/compatibility-audit/process-id').strip()
                     if pid.isdigit():
@@ -240,6 +286,18 @@ def main():
                 except subprocess.SubprocessError:
                     report['log_limitation'] = 'No process marker available; instrumentation may not have started'
                 (case / 'instrumentation.txt').write_text(output)
+            if args.capture_boot_rescue:
+                report.update(pull_boot_rescue(case, private, adb))
+            if args.capture_rescue or args.capture_boot_rescue:
+                # Preserve the exact disposable save even if a stuck game could not produce a Rescue.
+                try:
+                    save_data = adb('exec-out', shlex.join(['run-as', PACKAGE, 'tar', '-cf', '-', '-C', 'cache/compatibility-audit/saves/case', '.']), binary=True)
+                    with tarfile.open(fileobj=io.BytesIO(save_data)) as saved:
+                        saved.getmembers()
+                    (case / 'isolated-save.tar').write_bytes(save_data)
+                    report['isolated_save_sha256'] = hashlib.sha256(save_data).hexdigest()
+                except (subprocess.SubprocessError, tarfile.TarError, ValueError) as error:
+                    report['isolated_save_capture_error'] = str(error)
             (case / 'result.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
             results.append(report)
             (args.output / 'boot.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))
