@@ -580,6 +580,7 @@ mod tests {
                 (19, "indexOf", "(Ljava/lang/Object;)I"),
                 (23, "elementAt", "(I)Ljava/lang/Object;"),
                 (24, "firstElement", "()Ljava/lang/Object;"),
+                (26, "setElementAt", "(Ljava/lang/Object;I)V"),
                 (27, "removeElementAt", "(I)V"),
                 (28, "insertElementAt", "(Ljava/lang/Object;I)V"),
                 (29, "addElement", "(Ljava/lang/Object;)V"),
@@ -609,12 +610,33 @@ mod tests {
             assert_eq!(core.run_function::<u32>(index_of, &[receiver, expected[0]]).await?, 0);
             assert_eq!(core.run_function::<u32>(index_of, &[receiver, 0]).await?, 1);
             assert_eq!(core.run_function::<u32>(index_of, &[receiver, receiver]).await?, u32::MAX);
+            let replace: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 27 * 4)?;
+            for index in [0, 1, 2] {
+                core.run_function::<()>(replace, &[receiver, receiver, index]).await?;
+                assert_eq!(core.run_function::<u32>(element, &[receiver, index]).await?, receiver);
+                assert_eq!(core.run_function::<u32>(size, &[receiver]).await?, 3);
+                core.run_function::<()>(replace, &[receiver, expected[index as usize], index]).await?;
+            }
+            for index in [u32::MAX, 3] {
+                assert!(matches!(
+                    core.run_function::<()>(replace, &[receiver, receiver, index]).await,
+                    Err(wie_util::WieError::JavaException(_))
+                ));
+            }
+            assert_eq!(core.run_function::<u32>(size, &[receiver]).await?, 3);
+            for (index, value) in expected.iter().enumerate() {
+                assert_eq!(core.run_function::<u32>(element, &[receiver, index as u32]).await?, *value);
+            }
             let remove: u32 = read_generic(&core, vector_definition.ptr_vtable()? + 28 * 4)?;
             core.run_function::<()>(remove, &[receiver, 0]).await?;
             assert_eq!(core.run_function::<u32>(first_element, &[receiver]).await?, 0);
             for _ in 0..2 {
                 core.run_function::<()>(remove, &[receiver, 0]).await?;
             }
+            assert!(matches!(
+                core.run_function::<()>(replace, &[receiver, 0, 0]).await,
+                Err(wie_util::WieError::JavaException(_))
+            ));
             assert!(matches!(
                 core.run_function::<u32>(first_element, &[receiver]).await,
                 Err(wie_util::WieError::JavaException(_))

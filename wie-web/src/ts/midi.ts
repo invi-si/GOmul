@@ -88,19 +88,29 @@ export class AudioPlayer {
   private commands: Promise<void> = Promise.resolve();
   private disposed = false;
   private readonly gestureListeners = new AbortController();
+  private resuming?: Promise<void>;
+
+  private resumeContext(): Promise<void> {
+    const ctx = this.ctx;
+    if (this.resuming) return this.resuming;
+    if (!ctx || this.disposed || (ctx.state !== "suspended" && ctx.state !== "interrupted")) return Promise.resolve();
+
+    // Start resume in the gesture handler itself; WebKit may reject a call made
+    // after an asynchronous boundary. Share that attempt with queued playback.
+    let resumed: Promise<void>;
+    try { resumed = ctx.resume(); } catch (error) { return Promise.reject(error); }
+    const attempt = resumed.then(() => this.audioReady).then(state => {
+      if (!state || this.disposed || state.ctx !== ctx) return;
+      state.clockAudioTime = ctx.currentTime;
+      state.clockPerformanceTime = performance.timeOrigin + performance.now();
+    });
+    this.resuming = attempt.finally(() => { this.resuming = undefined; });
+    return this.resuming;
+  }
 
   constructor() {
     audioReady = this.audioReady;
-    // Safari may suspend contexts created after the archive download. Resume
-    // directly inside a later trusted gesture, not after another async boundary.
-    const resume = () => {
-      if (this.ctx?.state !== "suspended") return;
-      void this.ctx.resume().then(() => this.audioReady).then(state => {
-        if (!state || this.disposed) return;
-        state.clockAudioTime = state.ctx.currentTime;
-        state.clockPerformanceTime = performance.timeOrigin + performance.now();
-      }).catch(error => console.warn("Audio resume failed:", error));
-    };
+    const resume = () => { void this.resumeContext().catch(error => console.warn("Audio resume failed:", error)); };
     document.addEventListener("pointerdown", resume, {signal: this.gestureListeners.signal});
     document.addEventListener("keydown", resume, {signal: this.gestureListeners.signal});
     this.worker.onmessage = (message: MessageEvent<WorkerOutput>) => {
@@ -169,11 +179,7 @@ export class AudioPlayer {
       .then(async () => {
         const state = await this.audioReady;
         if (this.disposed) return;
-        if (state?.ctx.state === "suspended") {
-          await state.ctx.resume();
-          state.clockAudioTime = state.ctx.currentTime;
-          state.clockPerformanceTime = performance.timeOrigin + performance.now();
-        }
+        if (state) await this.resumeContext();
         if (this.disposed) return;
         this.worker.postMessage({ type: "play", handle, duration, events, repeat }, buffers);
       })

@@ -27,6 +27,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  private final Set<String> held=new HashSet<>();
  private LinearLayout root;private TextView status;private GameView gameView;private AudioOutput audio;
  private File dataImportGame;
+ private File saveBackupExport,saveBackupImportGame;
  private File rescueExport;private boolean rescueShown=false,rescueBusy=false;private long rescueSessionStart=0;
  private volatile int playbackRate=1000;private volatile long lastFramePickup;
  private File activeGame;private volatile boolean foreground=false;private boolean starting=false;private final int[] pixels=new int[1024*1024];
@@ -148,9 +149,11 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  }
  private void gameOptions(File game){
   if(starting)return;
-  new AlertDialog.Builder(this).setTitle(game.getName()).setItems(new String[]{"저장 데이터 가져오기","저장 데이터 초기화","게임 삭제"},(dialog,which)->{
-   if(which==0){chooseData(game);return;}
-   if(which==1){resetGameSave(game);return;}
+  new AlertDialog.Builder(this).setTitle(game.getName()).setItems(new String[]{"일반 저장 백업 내보내기","일반 저장 백업 가져오기","동봉 데이터 가져오기","저장 데이터 초기화","게임 삭제"},(dialog,which)->{
+   if(which==0){prepareSaveExport(game);return;}
+   if(which==1){chooseSaveImport(game);return;}
+   if(which==2){chooseData(game);return;}
+   if(which==3){resetGameSave(game);return;}
    new AlertDialog.Builder(this).setTitle("게임을 삭제할까요?").setMessage("목록에서 삭제할 게임: "+game.getName()+"\n저장 데이터, 빠른 저장 및 오류 보고서는 유지됩니다. 원본 파일은 삭제하지 않습니다.")
     .setNegativeButton("취소",null).setPositiveButton("삭제",(confirmation,button)->{
      starting=true;io.execute(()->{
@@ -174,6 +177,30 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
    }).show();
  }
  private File saveFolder(File game){return new File(getFilesDir(),"saves/"+game.getParentFile().getName());}
+ private void prepareSaveExport(File game){
+  if(starting)return;starting=true;Toast.makeText(this,"일반 저장 백업을 준비하는 중…",Toast.LENGTH_SHORT).show();
+  io.execute(()->{File prepared=null;try{
+   prepared=File.createTempFile("gomul-save-",".zip",getCacheDir());
+   try(OutputStream out=new FileOutputStream(prepared)){GameSaveBackup.exportSave(getFilesDir(),game.getParentFile().getName(),out);}
+   File ready=prepared;runOnUiThread(()->{
+    if(isFinishing()||isDestroyed()){ready.delete();starting=false;return;}
+    saveBackupExport=ready;
+    Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/zip");intent.addCategory(Intent.CATEGORY_OPENABLE);
+    intent.putExtra(Intent.EXTRA_TITLE,"GOmul-save-"+game.getParentFile().getName().substring(0,12)+".zip");
+    try{startActivityForResult(intent,5);}catch(Exception failure){ready.delete();saveBackupExport=null;starting=false;error(failure);}
+   });
+  }catch(Exception failure){if(prepared!=null)prepared.delete();postIfAlive(()->{starting=false;error(failure);});}});
+ }
+ private void chooseSaveImport(File game){
+  if(starting)return;
+  new AlertDialog.Builder(this).setTitle("일반 저장 백업을 가져올까요?")
+   .setMessage("선택한 게임의 현재 일반 저장을 교체합니다. 기존 일반 저장은 앱 안에 보관합니다. 빠른 저장과 게임 파일은 백업에 포함되지 않으며 변경하지 않습니다.")
+   .setNegativeButton("취소",null).setPositiveButton("백업 파일 선택",(dialog,which)->{
+    saveBackupImportGame=game;starting=true;
+    Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.setType("*/*");intent.addCategory(Intent.CATEGORY_OPENABLE);
+    try{startActivityForResult(intent,6);}catch(Exception failure){saveBackupImportGame=null;starting=false;error(failure);}
+   }).show();
+ }
  private void chooseData(File game){
   if(starting)return;dataImportGame=game;
   new AlertDialog.Builder(this).setTitle("저장 데이터 가져오기").setItems(new String[]{"데이터 ZIP 선택","데이터 폴더 선택"},(dialog,which)->{
@@ -222,6 +249,27 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
  }
  @Override protected void onActivityResult(int request,int result,Intent data){
   super.onActivityResult(request,result,data);
+  if(request==5){File prepared=saveBackupExport;saveBackupExport=null;
+   if(prepared==null){starting=false;return;}
+   if(result!=RESULT_OK||data==null||data.getData()==null){prepared.delete();starting=false;return;}
+   Uri destination=data.getData();io.execute(()->{
+    try(InputStream in=new FileInputStream(prepared);OutputStream out=getContentResolver().openOutputStream(destination)){
+     if(out==null)throw new IOException("백업 파일을 만들 수 없습니다.");copy(in,out);
+     postIfAlive(()->{starting=false;Toast.makeText(this,"일반 저장 백업을 내보냈습니다",Toast.LENGTH_LONG).show();});
+    }catch(Exception failure){postIfAlive(()->{starting=false;error(failure);});}finally{prepared.delete();}
+   });return;
+  }
+  if(request==6){File game=saveBackupImportGame;saveBackupImportGame=null;
+   if(result!=RESULT_OK||data==null||data.getData()==null){starting=false;return;}
+   if(game==null){starting=false;error(new IOException("백업을 가져올 게임을 다시 선택하세요."));return;}
+   Uri source=data.getData();io.execute(()->{
+    try(InputStream in=getContentResolver().openInputStream(source)){
+     if(in==null)throw new IOException("백업 파일을 열 수 없습니다.");
+     GameSaveBackup.importSave(getFilesDir(),game.getParentFile().getName(),in);
+     postIfAlive(()->{starting=false;showLibrary();Toast.makeText(this,"일반 저장 백업을 가져왔습니다",Toast.LENGTH_LONG).show();});
+    }catch(Exception failure){postIfAlive(()->{starting=false;error(failure);});}
+   });return;
+  }
   if(request==4){File prepared=rescueExport;rescueExport=null;rescueBusy=false;
    if(prepared!=null){if(result==RESULT_OK&&data!=null&&data.getData()!=null){Uri destination=data.getData();io.execute(()->{try(InputStream in=new FileInputStream(prepared);OutputStream out=getContentResolver().openOutputStream(destination)){if(out==null)throw new IOException("오류 보고서를 내보낼 수 없습니다");byte[] buffer=new byte[65536];int n;while((n=in.read(buffer))!=-1)out.write(buffer,0,n);postIfAlive(()->Toast.makeText(this,"오류 보고서를 내보냈습니다",Toast.LENGTH_LONG).show());}catch(Exception e){postIfAlive(()->rescueError(e));}finally{prepared.delete();}});}else prepared.delete();}return;}
 

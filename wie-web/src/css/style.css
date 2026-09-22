@@ -437,7 +437,7 @@ svg {
   width: min(100%, 1080px);
   height: 52px;
   margin: 0 auto;
-  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  grid-template-columns: 40px minmax(0, 1fr) auto 40px;
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
@@ -544,6 +544,20 @@ svg {
 .button-container .call-key {
   width: 65%;
   font-size: 0.8rem;
+}
+
+.player-toolbar .rapid-fire-toggle {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+
+.player-toolbar .rapid-fire-toggle[aria-pressed="true"] {
+  background: var(--accent-light);
 }
 
 .soft-keys button {

@@ -934,19 +934,61 @@ impl Graphics {
     }
 
     async fn get_rgb_pixels(
-        _jvm: &Jvm,
+        jvm: &Jvm,
         _context: &mut WieJvmContext,
         this: ClassInstanceRef<Self>,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
-        pixels: ClassInstanceRef<Array<i32>>,
+        mut pixels: ClassInstanceRef<Array<i32>>,
         offset: i32,
         bpl: i32,
     ) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Graphics::getRGBPixels({this:?}, {x}, {y}, {width}, {height}, {pixels:?}, {offset}, {bpl})");
+        tracing::debug!("org.kwis.msp.lcdui.Graphics::getRGBPixels({this:?}, {x}, {y}, {width}, {height}, {pixels:?}, {offset}, {bpl})");
 
+        if pixels.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "pixels is null").await);
+        }
+        if width < 0 || height < 0 || bpl < width {
+            return Err(jvm.exception("java/lang/IllegalArgumentException", "invalid pixel dimensions").await);
+        }
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let array_len = jvm.array_length(&pixels).await? as i64;
+        let last = i64::from(offset) + i64::from(height - 1) * i64::from(bpl) + i64::from(width);
+        if offset < 0 || last > array_len {
+            return Err(jvm.exception("java/lang/ArrayIndexOutOfBoundsException", "RGB destination range").await);
+        }
+
+        let mut midp_graphics: ClassInstanceRef<MidpGraphics> = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        let image = MidpGraphics::image(jvm, &mut midp_graphics).await?;
+        let backend_image = MidpImage::image(jvm, &image).await?;
+        let translate_x: i32 = jvm
+            .invoke_virtual(&midp_graphics, "javax/microedition/lcdui/Graphics", "getTranslateX", "()I", ())
+            .await?;
+        let translate_y: i32 = jvm
+            .invoke_virtual(&midp_graphics, "javax/microedition/lcdui/Graphics", "getTranslateY", "()I", ())
+            .await?;
+
+        for row in 0..height {
+            let mut colors = alloc::vec::Vec::with_capacity(width as usize);
+            for col in 0..width {
+                let pixel = x
+                    .checked_add(col)
+                    .and_then(|px| px.checked_add(translate_x))
+                    .zip(y.checked_add(row).and_then(|py| py.checked_add(translate_y)))
+                    .and_then(|(px, py)| {
+                        (px >= 0 && py >= 0 && (px as u32) < backend_image.width() && (py as u32) < backend_image.height())
+                            .then(|| backend_image.get_pixel(px, py))
+                    });
+                colors.push(pixel.map_or(0, |color| ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32));
+            }
+            jvm.store_array(&mut pixels, (i64::from(offset) + i64::from(row) * i64::from(bpl)) as usize, colors)
+                .await?;
+        }
         Ok(())
     }
 }
@@ -1189,6 +1231,59 @@ mod test {
                 0
             );
 
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn get_rgb_pixels_reads_translated_region_with_stride_and_preserves_padding() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (3, 2))
+                .await?;
+            let graphics: ClassInstanceRef<Graphics> = jvm
+                .invoke_virtual(&image, "org/kwis/msp/lcdui/Image", "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ())
+                .await?;
+            for (x, y, color) in [(0, 0, 0x123456), (1, 0, 0xabcdef), (0, 1, 0x456789), (1, 1, 0xfedcba)] {
+                let _: () = jvm
+                    .invoke_virtual(&graphics, "org/kwis/msp/lcdui/Graphics", "setColor", "(I)V", (color,))
+                    .await?;
+                let _: () = jvm
+                    .invoke_virtual(&graphics, "org/kwis/msp/lcdui/Graphics", "fillRect", "(IIII)V", (x, y, 1, 1))
+                    .await?;
+            }
+            let mut output = jvm.instantiate_array("I", 8).await?;
+            jvm.store_array(&mut output, 0, [77i32; 8]).await?;
+            let _: () = jvm
+                .invoke_virtual(&graphics, "org/kwis/msp/lcdui/Graphics", "translate", "(II)V", (1, 0))
+                .await?;
+            let _: () = jvm
+                .invoke_virtual(
+                    &graphics,
+                    "org/kwis/msp/lcdui/Graphics",
+                    "getRGBPixels",
+                    "(IIII[III)V",
+                    (-1, 0, 2, 2, output.clone(), 1, 3),
+                )
+                .await?;
+            assert_eq!(
+                jvm.load_array::<i32>(&output, 0, 8).await?,
+                [77, 0x123456, 0xabcdef, 77, 0x456789, 0xfedcba, 77, 77]
+            );
+
+            let before = jvm.load_array::<i32>(&output, 0, 8).await?;
+            assert!(
+                jvm.invoke_virtual::<_, ()>(
+                    &graphics,
+                    "org/kwis/msp/lcdui/Graphics",
+                    "getRGBPixels",
+                    "(IIII[III)V",
+                    (-1, 0, 2, 2, output.clone(), 4, 3)
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(jvm.load_array::<i32>(&output, 0, 8).await?, before);
             Ok(())
         })
     }

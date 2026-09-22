@@ -150,6 +150,7 @@ async function runBrowserSession(app:AppMetadata,selection:{game:string;index:nu
         for(const id of ['native-load','settings-load'])(document.getElementById(id) as HTMLButtonElement).disabled=!result.quick;
         (document.getElementById('settings-recover') as HTMLButtonElement).disabled=!result.recovery;
         (document.getElementById('native-latest-rescue') as HTMLButtonElement).disabled=!result.rescue;
+        if(result.status==='Stopped'||result.status?.startsWith('Game stopped')||result.status?.startsWith('Error:'))input.releaseAll();
         status.textContent=result.status==='Running'?'실행 중':result.status==='Loading…'?'게임 시작 중…':result.status?.startsWith('Game stopped')?'게임 중지 · 빠른 불러오기 가능':result.status==='Stopped'?'종료됨':result.status||'';
         if(result.status!==lastStatus&&result.status?.startsWith('Error:'))tell('게임 오류가 발생했습니다. 설정에서 오류 보고서를 내보내거나 빠른 불러오기를 사용하세요.',true);
         lastStatus=result.status||'';

@@ -116,12 +116,76 @@ export class HeldGameKeys {
   }
 }
 
+type RapidFireMode = "off" | "manual" | "auto";
+
+class RapidFireKeys implements GameInputSink {
+  mode: RapidFireMode = "off";
+  private autoKey?: string;
+  private readonly pulses = new Map<string, { down: boolean; timer: number }>();
+  private readonly sink: GameInputSink;
+  private readonly window: Window;
+
+  constructor(sink: GameInputSink, window: Window) {
+    this.sink = sink;
+    this.window = window;
+  }
+
+  private start(key: string): void {
+    if (this.pulses.has(key)) return;
+    this.sink.key_down(key);
+    const pulse = { down: true, timer: 0 };
+    const tick = () => {
+      if (this.pulses.get(key) !== pulse) return;
+      pulse.down = !pulse.down;
+      if (pulse.down) this.sink.key_down(key); else this.sink.key_up(key);
+      pulse.timer = this.window.setTimeout(tick, 50);
+    };
+    this.pulses.set(key, pulse);
+    pulse.timer = this.window.setTimeout(tick, 50);
+  }
+
+  private stop(key: string): void {
+    const pulse = this.pulses.get(key);
+    if (!pulse) return;
+    this.window.clearTimeout(pulse.timer);
+    this.pulses.delete(key);
+    if (pulse.down) this.sink.key_up(key);
+  }
+
+  key_down(key: string): void {
+    if (this.mode === "off" || (key !== "5" && key !== "OK")) {
+      this.sink.key_down(key);
+    } else if (this.mode === "manual") {
+      this.start(key);
+    } else if (this.autoKey === key) {
+      this.stop(key);
+      this.autoKey = undefined;
+    } else {
+      if (this.autoKey) this.stop(this.autoKey);
+      this.autoKey = key;
+      this.start(key);
+    }
+  }
+
+  key_up(key: string): void {
+    if (this.mode === "off" || (key !== "5" && key !== "OK")) this.sink.key_up(key);
+    else if (this.mode === "manual") this.stop(key);
+  }
+
+  reset(): void {
+    for (const key of this.pulses.keys()) this.stop(key);
+    this.autoKey = undefined;
+    this.mode = "off";
+  }
+}
+
 export const bindGameInput = (root: HTMLElement, sink: GameInputSink) => {
   const document = root.ownerDocument;
   const window = document.defaultView!;
   const abortController = new AbortController();
   const options = { signal: abortController.signal };
   const buttons = [...root.querySelectorAll<HTMLButtonElement>("button[data-key]")];
+  const rapidToggle = root.querySelector<HTMLButtonElement>("button[data-rapid-fire]");
   const activationTimers = new Map<string, number>();
   const showPressed = (key: string, pressed: boolean) => {
     for (const button of buttons) {
@@ -130,7 +194,7 @@ export const bindGameInput = (root: HTMLElement, sink: GameInputSink) => {
       }
     }
   };
-  const held = new HeldGameKeys({
+  const rapid = new RapidFireKeys({
     key_down(key) {
       sink.key_down(key);
       showPressed(key, true);
@@ -139,7 +203,17 @@ export const bindGameInput = (root: HTMLElement, sink: GameInputSink) => {
       sink.key_up(key);
       showPressed(key, false);
     },
-  });
+  }, window);
+  const held = new HeldGameKeys(rapid);
+  const showRapidMode = () => {
+    if (!rapidToggle) return;
+    const name = {off: "끔", manual: "수동", auto: "자동"}[rapid.mode];
+    rapidToggle.textContent = `연사 ${name}`;
+    rapidToggle.setAttribute("aria-label", `연사 ${name}. 숫자 5 또는 확인 키에 적용`);
+    rapidToggle.setAttribute("aria-pressed", String(rapid.mode !== "off"));
+    rapidToggle.title = rapid.mode === "manual" ? "5 또는 확인을 누르는 동안 연사" : rapid.mode === "auto" ? "5 또는 확인을 누르면 시작, 다시 누르면 중지" : "연사 끔";
+  };
+  showRapidMode();
 
   for (const button of buttons) {
     button.addEventListener("pointerdown", (event) => {
@@ -214,7 +288,15 @@ export const bindGameInput = (root: HTMLElement, sink: GameInputSink) => {
     }
     activationTimers.clear();
     held.releaseAll();
+    rapid.reset();
+    showRapidMode();
   };
+  rapidToggle?.addEventListener("click", () => {
+    const next = rapid.mode === "off" ? "manual" : rapid.mode === "manual" ? "auto" : "off";
+    releaseAll();
+    rapid.mode = next;
+    showRapidMode();
+  }, options);
   document.addEventListener("focusin", (event) => {
     if (isEditing(event.target)) {
       releaseAll();

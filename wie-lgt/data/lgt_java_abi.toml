@@ -105,6 +105,7 @@ vtable = [
     { name = "indexOf", descriptor = "(Ljava/lang/Object;)I", index = 19 },
     { name = "elementAt", descriptor = "(I)Ljava/lang/Object;", index = 23 },
     { name = "firstElement", descriptor = "()Ljava/lang/Object;", index = 24 },
+    { name = "setElementAt", descriptor = "(Ljava/lang/Object;I)V", index = 26 },
     { name = "removeElementAt", descriptor = "(I)V", index = 27 },
     { name = "insertElementAt", descriptor = "(Ljava/lang/Object;I)V", index = 28 },
     { name = "addElement", descriptor = "(Ljava/lang/Object;)V", index = 29 },

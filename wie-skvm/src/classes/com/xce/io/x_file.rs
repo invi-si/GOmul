@@ -6,6 +6,7 @@ use jvm_types::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
 use rustjava_runtime::classes::java::{
     io::{FileDescriptor, InputStream, OutputStream, RandomAccessFile},
     lang::String,
+    util::jar::{JarEntry, JarFile},
 };
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
@@ -315,8 +316,8 @@ impl XFile {
 
     async fn init_with_jar(
         jvm: &Jvm,
-        _context: &mut WieJvmContext,
-        this: ClassInstanceRef<Self>,
+        context: &mut WieJvmContext,
+        mut this: ClassInstanceRef<Self>,
         jar_file: ClassInstanceRef<String>,
         name: ClassInstanceRef<String>,
     ) -> JvmResult<()> {
@@ -326,9 +327,47 @@ impl XFile {
             return Err(jvm.exception("java/lang/NullPointerException", "jarfile and name must not be null").await);
         }
 
+        let jar_path = JavaLangString::to_rust_string(jvm, &jar_file).await?;
+        let entry_path = JavaLangString::to_rust_string(jvm, &name).await?;
+        let entry_path = entry_path.trim_start_matches('/');
+        let filesystem = context.system().filesystem();
+        if !filesystem.is_valid_path(&jar_path) || !filesystem.is_valid_path(entry_path) {
+            return Err(jvm.exception("java/io/IOException", "Invalid archive path").await);
+        }
+
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
-        tracing::warn!("unsupported com.xce.io.XFile::<init>(jarfile, name)");
-        Err(jvm.exception("java/io/IOException", "JAR file selection is not supported").await)
+        let archive: ClassInstanceRef<JarFile> = jvm.new_class("java/util/jar/JarFile", "(Ljava/lang/String;)V", (jar_file,)).await?.into();
+        let entry_name = JavaLangString::from_rust_string(jvm, entry_path).await?;
+        let entry: ClassInstanceRef<JarEntry> = jvm
+            .invoke_virtual(
+                &archive,
+                "java/util/jar/JarFile",
+                "getJarEntry",
+                "(Ljava/lang/String;)Ljava/util/jar/JarEntry;",
+                (entry_name,),
+            )
+            .await?;
+        if entry.is_null() {
+            return Err(jvm.exception("java/io/IOException", "Archive entry was not found").await);
+        }
+        let stream: ClassInstanceRef<InputStream> = jvm
+            .invoke_virtual(
+                &archive,
+                "java/util/jar/JarFile",
+                "getInputStream",
+                "(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;",
+                (entry,),
+            )
+            .await?;
+        if stream.is_null() {
+            return Err(jvm.exception("java/io/IOException", "Archive entry could not be read").await);
+        }
+
+        jvm.put_field(&mut this, "type", "I", FILE_JAR).await?;
+        jvm.put_field(&mut this, "mode", "I", READ_RESOURCE).await?;
+        jvm.put_field(&mut this, "offset", "I", 0).await?;
+        jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", stream).await?;
+        Ok(())
     }
 
     async fn exists(jvm: &Jvm, context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
@@ -513,7 +552,7 @@ impl XFile {
         Ok(length)
     }
 
-    async fn close(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+    async fn close(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("com.xce.io.XFile::close({this:?})");
 
         let file_type: i32 = jvm.get_field(&this, "type", "I").await?;
@@ -522,7 +561,10 @@ impl XFile {
             return Ok(());
         } else if mode == READ_RESOURCE {
             let is: ClassInstanceRef<InputStream> = jvm.get_field(&this, "is", "Ljava/io/InputStream;").await?;
-            let _: () = jvm.invoke_virtual(&is, "java/io/InputStream", "close", "()V", ()).await?;
+            if !is.is_null() {
+                let _: () = jvm.invoke_virtual(&is, "java/io/InputStream", "close", "()V", ()).await?;
+                jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", None).await?;
+            }
         } else {
             let raf = jvm.get_field(&this, "raf", "Ljava/io/RandomAccessFile;").await?;
             let _: () = jvm.invoke_virtual(&raf, "java/io/RandomAccessFile", "close", "()V", ()).await?;
@@ -642,10 +684,94 @@ mod tests {
 
     use jvm::{Array, ClassInstanceRef, JavaError, Result as JvmResult, runtime::JavaLangString};
     use rustjava_runtime::classes::java::lang::String;
-    use test_utils::run_jvm_test;
+    use test_utils::{TestPlatform, run_jvm_test, run_jvm_test_with_system};
 
     use super::{FILE_JAR, READ_RESOURCE, XFile};
     use crate::classes::com::xce::io::{file_input_stream::FileInputStream, file_output_stream::FileOutputStream};
+
+    #[test]
+    fn xfile_reads_a_packaged_secondary_jar_entry() {
+        let result = run_jvm_test_with_system(
+            Box::new([Box::new([XFile::as_proto(), FileInputStream::as_proto()])]),
+            Box::new(TestPlatform::new()),
+            |jvm, system| async move {
+                system
+                    .filesystem()
+                    .add_virtual("maps.jar", include_bytes!("testdata/secondary.jar").to_vec());
+                let archive: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "maps.jar").await?.into();
+                let entry: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "/maps/0.bin").await?.into();
+                let file: ClassInstanceRef<XFile> = jvm
+                    .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (archive, entry))
+                    .await?
+                    .into();
+
+                assert_eq!(jvm.get_field::<i32>(&file, "type", "I").await?, FILE_JAR);
+                assert_eq!(jvm.get_field::<i32>(&file, "mode", "I").await?, READ_RESOURCE);
+                assert_eq!(jvm.invoke_virtual::<_, i32>(&file, "com/xce/io/XFile", "available", "()I", ()).await?, 4);
+
+                let target: ClassInstanceRef<Array<i8>> = jvm.instantiate_array("B", 6).await?.into();
+                let read: i32 = jvm
+                    .invoke_virtual(&file, "com/xce/io/XFile", "read", "([BII)I", (target.clone(), 1, 4))
+                    .await?;
+                assert_eq!(read, 4);
+                assert_eq!(jvm.load_array::<i8>(&target, 0, 6).await?, [0, 7, 11, 19, 23, 0]);
+                assert_eq!(jvm.get_field::<i32>(&file, "offset", "I").await?, 4);
+                assert_eq!(jvm.invoke_virtual::<_, i32>(&file, "com/xce/io/XFile", "available", "()I", ()).await?, 0);
+                assert_eq!(
+                    jvm.invoke_virtual::<_, i32>(&file, "com/xce/io/XFile", "read", "([BII)I", (target, 0, 1))
+                        .await?,
+                    -1
+                );
+
+                let _: () = jvm.invoke_virtual(&file, "com/xce/io/XFile", "close", "()V", ()).await?;
+                let available: JvmResult<i32> = jvm.invoke_virtual(&file, "com/xce/io/XFile", "available", "()I", ()).await;
+                let Err(JavaError::JavaException(exception)) = available else {
+                    panic!("closed archive entry reported readable bytes");
+                };
+                assert!(jvm.is_instance(&*exception, "java/io/IOException"));
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok(), "JVM test failed: {result:?}");
+    }
+
+    #[test]
+    fn xfile_archive_entry_rejects_missing_and_unsafe_paths() {
+        let result = run_jvm_test_with_system(
+            Box::new([Box::new([XFile::as_proto()])]),
+            Box::new(TestPlatform::new()),
+            |jvm, system| async move {
+                system
+                    .filesystem()
+                    .add_virtual("maps.jar", include_bytes!("testdata/secondary.jar").to_vec());
+                system.filesystem().add_virtual("broken.jar", b"not a JAR".to_vec());
+                for (archive_path, entry_path) in [
+                    ("missing.jar", "maps/0.bin"),
+                    ("broken.jar", "maps/0.bin"),
+                    ("maps.jar", "absent.bin"),
+                    ("maps.jar", "../maps/0.bin"),
+                    ("../maps.jar", "maps/0.bin"),
+                    ("maps.jar", "maps\\0.bin"),
+                    ("maps.jar", ""),
+                ] {
+                    let archive: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, archive_path).await?.into();
+                    let entry: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, entry_path).await?.into();
+                    let opened: JvmResult<ClassInstanceRef<XFile>> = jvm
+                        .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (archive, entry))
+                        .await
+                        .map(Into::into);
+                    let Err(JavaError::JavaException(exception)) = opened else {
+                        panic!("XFile accepted archive path {archive_path:?}, entry {entry_path:?}");
+                    };
+                    assert!(jvm.is_instance(&*exception, "java/io/IOException"), "{archive_path:?}, {entry_path:?}");
+                }
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok(), "JVM test failed: {result:?}");
+    }
 
     #[test]
     fn xfile_write_read_and_seek_round_trip() {

@@ -190,7 +190,9 @@ impl Database {
                 Err(error) => return Err(error),
             }
         };
-        let result = write(&mut file);
+        // Flush the completed replacement before publishing its name. If the
+        // write or flush fails, the old record is still the visible one.
+        let result = write(&mut file).and_then(|()| file.sync_all());
         drop(file);
         // A failed or interrupted write must leave the previous record intact.
         // Same-directory rename publishes only the complete replacement.
@@ -213,9 +215,15 @@ impl wie_backend::Database for Database {
 
         tracing::trace!("Adding record {id} to database {:?}", &self.base_path);
 
-        self.replace_record(id, |file| file.write_all(data)).unwrap();
-
-        id
+        match self.replace_record(id, |file| file.write_all(data)) {
+            Ok(()) => id,
+            Err(error) => {
+                tracing::warn!("Failed to add database record: {error}");
+                // Record ID zero is invalid and lets RMS report a write failure
+                // to the guest rather than terminating the emulator.
+                0
+            }
+        }
     }
 
     async fn get(&self, id: RecordId) -> Option<Vec<u8>> {
@@ -241,8 +249,14 @@ impl wie_backend::Database for Database {
     }
 
     async fn get_record_ids(&self) -> Vec<RecordId> {
-        fs::read_dir(&self.base_path)
-            .unwrap()
+        let entries = match fs::read_dir(&self.base_path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!("Failed to list database records: {error}");
+                return Vec::new();
+            }
+        };
+        entries
             // Interrupted writes and imported sidecar files are not guest records.
             .filter_map(|entry| {
                 let entry = entry.ok()?;
@@ -321,5 +335,21 @@ mod tests {
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert_eq!(ids.as_mut().poll(&mut context), std::task::Poll::Ready(vec![1]));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_add_returns_invalid_id_instead_of_panicking() {
+        use super::*;
+        use wie_backend::Database as _;
+        let root = std::env::temp_dir().join(format!("gomul-failed-add-{}", std::process::id()));
+        let mut db = Database::new(root.clone()).unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        let mut add = db.add(b"save");
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(add.as_mut().poll(&mut context), std::task::Poll::Ready(0));
+        drop(add);
+        let mut ids = db.get_record_ids();
+        assert_eq!(ids.as_mut().poll(&mut context), std::task::Poll::Ready(Vec::new()));
     }
 }

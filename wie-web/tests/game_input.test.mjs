@@ -19,6 +19,7 @@ class FakeElement extends EventTarget {
   isButton = false;
   capturedPointers = [];
   pressed = new Set();
+  attributes = new Map();
   classList = {
     toggle: (name, enabled) => enabled ? this.pressed.add(name) : this.pressed.delete(name),
   };
@@ -29,6 +30,8 @@ class FakeElement extends EventTarget {
     return this.editing ? this : null;
   }
   setPointerCapture(pointerId) { this.capturedPointers.push(pointerId); }
+  setAttribute(name, value) { this.attributes.set(name, value); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
 }
 globalThis.Element = FakeElement;
 
@@ -53,9 +56,8 @@ const fixture = () => {
   };
   document.defaultView.clearTimeout = (timer) => timers.delete(timer);
   const flushTimers = () => {
-    for (const [timer, callback] of timers) {
-      timers.delete(timer);
-      callback();
+    for (const [timer, callback] of [...timers]) {
+      if (timers.delete(timer)) callback();
     }
   };
   document.hidden = false;
@@ -68,9 +70,12 @@ const fixture = () => {
   const root = new FakeElement();
   root.ownerDocument = document;
   root.querySelectorAll = () => buttons;
+  const rapidToggle = new FakeElement();
+  rapidToggle.isButton = true;
+  root.querySelector = () => rapidToggle;
   const sink = recordingSink();
   const input = bindGameInput(root, sink);
-  return { document, window: document.defaultView, buttons, sink, input, timers, flushTimers };
+  return { document, window: document.defaultView, buttons, rapidToggle, sink, input, timers, flushTimers };
 };
 
 test("one input source cannot release another source holding the same phone key", () => {
@@ -281,4 +286,75 @@ test("numeric direction profiles preserve aliases until both inputs release",()=
  for(const [key,value] of Object.entries({UP:"2",LEFT:"4",RIGHT:"6",DOWN:"8",OK:"OK",LSOFT:"LSOFT"})){
   assert.equal(directionalGameKey(key,true),value);assert.equal(directionalGameKey(key,false),key);
  }
+});
+
+test("rapid fire defaults off and manual mode pulses only while 5 or OK is held", () => {
+  const f = fixture();
+  assert.equal(f.rapidToggle.textContent, "연사 끔");
+  fire(f.document, "keydown", {code: "Digit5", key: "5"});
+  fire(f.document, "keyup", {code: "Digit5", key: "5"});
+  assert.deepEqual(f.sink.events, [["down", "5"], ["up", "5"]]);
+  assert.equal(f.timers.size, 0);
+
+  fire(f.rapidToggle, "click");
+  assert.equal(f.rapidToggle.textContent, "연사 수동");
+  fire(f.document, "keydown", {code: "ArrowUp", key: "ArrowUp"});
+  fire(f.document, "keydown", {code: "Enter", key: "Enter"});
+  assert.deepEqual(f.sink.events.slice(2), [["down", "UP"], ["down", "OK"]]);
+  f.flushTimers();
+  f.flushTimers();
+  fire(f.document, "keyup", {code: "Enter", key: "Enter"});
+  assert.deepEqual(f.sink.events.slice(4), [["up", "OK"], ["down", "OK"], ["up", "OK"]]);
+  assert.equal(f.timers.size, 0);
+  fire(f.document, "keyup", {code: "ArrowUp", key: "ArrowUp"});
+  assert.deepEqual(f.sink.events.at(-1), ["up", "UP"]);
+  fire(f.buttons[1], "pointerdown", {pointerId: 8, button: 0});
+  f.flushTimers();
+  fire(f.buttons[1], "pointerup", {pointerId: 8});
+  assert.deepEqual(f.sink.events.slice(-2), [["down", "OK"], ["up", "OK"]]);
+  assert.equal(f.timers.size, 0);
+  f.input.dispose();
+});
+
+test("auto rapid fire changes targets, toggles off, and resets on blur or game exit", () => {
+  const f = fixture();
+  fire(f.rapidToggle, "click");
+  fire(f.rapidToggle, "click");
+  assert.equal(f.rapidToggle.textContent, "연사 자동");
+  fire(f.document, "keydown", {code: "Digit5", key: "5"});
+  fire(f.document, "keyup", {code: "Digit5", key: "5"});
+  f.flushTimers();
+  fire(f.document, "keydown", {code: "Enter", key: "Enter"});
+  fire(f.document, "keyup", {code: "Enter", key: "Enter"});
+  assert.deepEqual(f.sink.events, [["down", "5"], ["up", "5"], ["down", "OK"]]);
+  fire(f.document, "keydown", {code: "Enter", key: "Enter"});
+  assert.deepEqual(f.sink.events.at(-1), ["up", "OK"]);
+  assert.equal(f.timers.size, 0);
+  fire(f.document, "keyup", {code: "Enter", key: "Enter"});
+
+  fire(f.document, "keydown", {code: "Digit5", key: "5"});
+  fire(f.document, "keyup", {code: "Digit5", key: "5"});
+  fire(f.window, "blur");
+  assert.deepEqual(f.sink.events.slice(-2), [["down", "5"], ["up", "5"]]);
+  assert.equal(f.rapidToggle.textContent, "연사 끔");
+  assert.equal(f.timers.size, 0);
+
+  fire(f.rapidToggle, "click");
+  fire(f.document, "keydown", {code: "Digit5", key: "5"});
+  f.input.dispose();
+  assert.deepEqual(f.sink.events.slice(-2), [["down", "5"], ["up", "5"]]);
+  assert.equal(f.timers.size, 0);
+});
+
+test("changing rapid-fire mode releases an active pulse and clears held sources", () => {
+  const f = fixture();
+  fire(f.rapidToggle, "click");
+  fire(f.document, "keydown", {code: "Digit5", key: "5"});
+  fire(f.rapidToggle, "click");
+  assert.deepEqual(f.sink.events, [["down", "5"], ["up", "5"]]);
+  assert.equal(f.rapidToggle.textContent, "연사 자동");
+  assert.equal(f.timers.size, 0);
+  fire(f.document, "keyup", {code: "Digit5", key: "5"});
+  assert.equal(f.sink.events.length, 2);
+  f.input.dispose();
 });
