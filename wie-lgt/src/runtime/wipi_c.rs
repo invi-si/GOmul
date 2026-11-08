@@ -19,10 +19,14 @@ use context::LgtWIPICContext;
 
 use crate::runtime::{SVC_CATEGORY_WIPIC, svc_ids::WIPICSvcId};
 
-// LGT's native 0x322 call passes the address of the application-context
-// handle (observed stack slot), unlike the shared WIPI by-value contract.
+// LGT callers use both the application-context handle and a pointer to a
+// handle slot. Identify our guest-backed context before dereferencing a slot.
 async fn create_component(context: &mut dyn WIPICContext, pac_ptr: u32, cls: u32) -> Result<wipi_types::wipic::WIPICIndirectPtr> {
-    let pac = if pac_ptr == 0 { 0 } else { read_generic::<u32, _>(context, pac_ptr)? };
+    let pac = if pac_ptr == 0 || uic::is_application_context(context, pac_ptr)? {
+        pac_ptr
+    } else {
+        read_generic::<u32, _>(context, pac_ptr)?
+    };
     uic::create(context, pac, cls).await
 }
 
@@ -471,6 +475,9 @@ mod tests {
             wie_util::write_null_terminated_string_bytes(&mut core, memory + 4, b"DateTimeComponent")?;
             let cls = core.run_function::<u32>(class, &[memory + 4]).await?;
             let pac = core.run_function::<u32>(application, &[]).await?;
+            let direct = core.run_function::<u32>(create, &[pac, cls]).await?;
+            assert_ne!(direct, u32::MAX);
+            core.run_function::<()>(destroy, &[direct]).await?;
             wie_util::write_generic(&mut core, memory, pac)?;
             let first = core.run_function::<u32>(create, &[memory, cls]).await?;
             let second = core.run_function::<u32>(create, &[memory, cls]).await?;

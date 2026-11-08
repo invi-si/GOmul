@@ -10,7 +10,7 @@ use rustjava_runtime::classes::java::lang::String;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::javax::microedition::media::Player;
 
-use crate::classes::org::kwis::msp::media::PlayListener;
+use crate::classes::org::kwis::msp::media::{BaseClip, PlayListener};
 
 // class org.kwis.msp.media.Clip
 pub struct Clip;
@@ -135,10 +135,16 @@ impl Clip {
     ) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.media.Clip::<init>({this:?}, {type:?}, {size})");
 
-        let data = jvm.instantiate_array("B", size as _).await?;
+        if size < 0 {
+            return Err(jvm.exception("java/lang/NegativeArraySizeException", "Negative clip capacity").await);
+        }
+        let data = jvm.instantiate_array("B", size as usize).await?;
 
         let _: () = jvm
-            .invoke_special(&this, "org/kwis/msp/media/Clip", "<init>", "(Ljava/lang/String;[B)V", (r#type, data))
+            .invoke_special(&this, "org/kwis/msp/media/Clip", "<init>", "(Ljava/lang/String;)V", (r#type,))
+            .await?;
+        let _: bool = jvm
+            .invoke_virtual(&this, "org/kwis/msp/media/BaseClip", "setBuffer", "([BI)Z", (data, 0))
             .await?;
 
         Ok(())
@@ -182,8 +188,8 @@ impl Clip {
     ) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.media.Clip::setBuffer({this:?}, {buffer:?}, {size})");
 
-        let _: i32 = jvm
-            .invoke_virtual(&this, "org/kwis/msp/media/Clip", "putData", "([BII)I", (buffer, 0, size))
+        let _: bool = jvm
+            .invoke_virtual(&this, "org/kwis/msp/media/BaseClip", "setBuffer", "([BI)Z", (buffer, size))
             .await?;
 
         Ok(())
@@ -229,6 +235,13 @@ impl Clip {
         jvm.get_field(&this, "volume", "I").await
     }
 
+    pub async fn prepare_player(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Player>> {
+        if this.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "clip is null").await);
+        }
+        BaseClip::prepare_player(jvm, this.clone()).await
+    }
+
     pub async fn player(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Player>> {
         // Dereferencing ClassInstanceRef before the JVM sees it would panic in Rust.
         // Preserve a guest exception so the application's handler can run.
@@ -249,6 +262,66 @@ mod test {
     use wie_util::Result;
 
     use crate::{classes::org::kwis::msp::media::Clip, get_protos};
+
+    #[test]
+    fn buffer_allocation_defers_decoding_and_tracks_written_data() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let kind = JavaLangString::from_rust_string(&jvm, "application/vnd.smaf").await?;
+            let clip: ClassInstanceRef<Clip> = jvm
+                .new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;I)V", (kind, 12))
+                .await?
+                .into();
+            assert!(Clip::prepare_player(&jvm, &clip).await?.is_null());
+            let count: i32 = jvm
+                .invoke_virtual(&clip, "org/kwis/msp/media/Clip", "availableDataSize", "()I", ())
+                .await?;
+            assert_eq!(count, 0);
+            let mut data = jvm.instantiate_array("B", 10).await?;
+            jvm.store_array(&mut data, 0, [77i8, 77, 77, 68, 0, 0, 0, 2, 0, 0]).await?;
+            for (offset, length) in [(0, 4), (4, 6)] {
+                let written: i32 = jvm
+                    .invoke_virtual(&clip, "org/kwis/msp/media/Clip", "putData", "([BII)I", (data.clone(), offset, length))
+                    .await?;
+                assert_eq!(written, length);
+            }
+            assert!(!Clip::prepare_player(&jvm, &clip).await?.is_null());
+            let count: i32 = jvm
+                .invoke_virtual(&clip, "org/kwis/msp/media/Clip", "availableDataSize", "()I", ())
+                .await?;
+            assert_eq!(count, 10);
+            let written: i32 = jvm
+                .invoke_virtual(&clip, "org/kwis/msp/media/Clip", "putData", "([BII)I", (data.clone(), 0, 4))
+                .await?;
+            assert_eq!(written, 2);
+            let _: () = jvm.invoke_virtual(&clip, "org/kwis/msp/media/Clip", "clearData", "()V", ()).await?;
+            assert!(Clip::prepare_player(&jvm, &clip).await?.is_null());
+            let invalid: jvm::Result<i32> = jvm
+                .invoke_virtual(&clip, "org/kwis/msp/media/Clip", "putData", "([BII)I", (data, -1, 2))
+                .await;
+            assert!(invalid.is_err());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn assigned_buffer_is_decoded_at_playback_not_registration() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let kind = JavaLangString::from_rust_string(&jvm, "application/vnd.smaf").await?;
+            let clip: ClassInstanceRef<Clip> = jvm.new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (kind,)).await?.into();
+            let mut data = jvm.instantiate_array("B", 10).await?;
+            let _: () = jvm
+                .invoke_virtual(&clip, "org/kwis/msp/media/Clip", "setBuffer", "([BI)V", (data.clone(), 10))
+                .await?;
+            assert!(Clip::prepare_player(&jvm, &clip).await.is_err());
+            jvm.store_array(&mut data, 0, [77i8, 77, 77, 68, 0, 0, 0, 2, 0, 0]).await?;
+            assert!(!Clip::prepare_player(&jvm, &clip).await?.is_null());
+            let replaced: bool = jvm
+                .invoke_virtual(&clip, "org/kwis/msp/media/BaseClip", "setBuffer", "([BI)Z", (data, 0))
+                .await?;
+            assert!(!replaced);
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_position_and_stop_time_round_trip() -> Result<()> {

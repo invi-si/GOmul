@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-ALLOWED_ARCHIVES={'wie-ktf/tests/data/helloworld_ktf.zip','wie-lgt/tests/data/helloworld_lgt.zip','wie-android/android/gradle/wrapper/gradle-wrapper.jar'}
+ALLOWED_ARCHIVES={'wie-ktf/tests/data/helloworld_ktf.zip','wie-lgt/tests/data/helloworld_lgt.zip','wie-android/android/gradle/wrapper/gradle-wrapper.jar','wie-skvm/src/classes/com/xce/io/testdata/secondary.jar'}
 PATTERNS={
  'personal home path': re.compile(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/'),
  'GitHub credential': re.compile(rb'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b'),

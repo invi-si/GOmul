@@ -10,6 +10,9 @@
 - [라이선스·출처](../THIRD_PARTY_NOTICES.md)
 - [공개 갱신 검증](public-update-20260914.md)
 - [Android 안정성 점검](android-reliability-20260923.md)
+- [다섯 게임 부팅 수정 및 재검증](five-game-boot-fixes-20260923.md)
+- [W-Feature 보완 구현](wfeature-complement-20260923.md)
+- [Android 3배속 조사 결과와 제한](android-compatibility-smoke-20260923.md)
 
 ## 세부 개발 기록
 

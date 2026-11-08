@@ -106,7 +106,7 @@ impl Player {
     async fn play_clip(jvm: &Jvm, _context: &mut WieJvmContext, clip: ClassInstanceRef<Clip>, repeat: bool) -> JvmResult<bool> {
         tracing::debug!("org.kwis.msp.media.Player::play({clip:?}, {repeat})");
 
-        let player = Clip::player(jvm, &clip).await?;
+        let player = Clip::prepare_player(jvm, &clip).await?;
 
         if !player.is_null() {
             let _: () = jvm.invoke_virtual(&player, "net/wie/SmafPlayer", "start", "(Z)V", (repeat,)).await?;
